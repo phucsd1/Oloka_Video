@@ -45,6 +45,6 @@ No Workspace, password/GitHub auth, anonymous product access, global asset libra
 
 CI validation must succeed before HF sync. Runtime metadata includes Git source SHA. Health/liveness is separate from readiness of database/storage/providers. Cloudflare does not appear in the MVP architecture or deployment contract.
 
-## Phase 2 technical choices still open
+## Phase 2 technical resolution
 
-Phase 1 fixes behavior and boundaries but intentionally leaves these implementation choices to Phase 2: production database adapter/engine activation and migration mechanics; concrete object-storage provider and multipart protocol; durable dispatcher/outbox technology and lease intervals; secret-manager implementation; exact CSRF/cookie deployment settings; concrete JSON schema and generated typed contracts; provider model/voice mappings and sandbox accounts; codec allowlist/duration tolerances; preview worker isolation; purge scheduler technology; and capacity tuning from measured development traffic. None may change the accepted product decisions without a new ADR.
+The implementation choices intentionally left open by Phase 1 are now resolved by `TECHNICAL_ARCHITECTURE_V1.md` and the supporting Phase 2 blueprints/ADRs. Provider-specific model/voice selections, measured capacity numbers, and exact dependency locks remain slice-time configuration decisions; they cannot change the accepted product boundary without a new ADR and product-owner approval.

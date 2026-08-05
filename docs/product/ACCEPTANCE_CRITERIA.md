@@ -2,6 +2,8 @@
 
 Each criterion is independently testable. “API” means the future typed capability, not an implementation created in Phase 1.
 
+Phase 2 maps these criteria to concrete test layers and fixtures in `docs/architecture/TEST_ARCHITECTURE_V1.md`; that mapping does not change product scope or criterion meaning.
+
 ## Authentication
 
 | ID         | Given / when / then                                                                                                                                                  | Planned test               |
@@ -68,26 +70,26 @@ Each criterion is independently testable. “API” means the future typed capab
 
 ## Jobs
 
-| ID        | Given / when / then                                                                                                                                                                    | Planned test                                                                      |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------- |
-| AC-JOB-01 | Accepted generation creates a unique opaque Job ID, idempotency record and durable `queued` state before response.                                                                     | integration                                                                       |
-| AC-JOB-02 | Application restart does not lose an accepted Job/Step record.                                                                                                                         | restart/recovery                                                                  |
-| AC-JOB-03 | Expired `running` lease permits reconciler `running -> queued` only for non-terminal checkpoint-resumable/idempotent work without an active provider operation; old-owner writes fail. | restart/recovery, concurrency                                                     |
-| AC-JOB-04 | Two workers cannot commit the same Step under one lease version.                                                                                                                       | concurrency, integration                                                          |
-| AC-JOB-05 | Replaying a completed Step does not duplicate provider operation/artifact.                                                                                                             | integration, provider sandbox                                                     |
-| AC-JOB-06 | Same idempotency key/request returns existing Job; different request returns `IDEMPOTENCY_CONFLICT`.                                                                                   | contract, integration                                                             |
-| AC-JOB-07 | Cancel request follows allowed transitions and invalid states return `JOB_NOT_CANCELLABLE`.                                                                                            | unit, integration                                                                 |
-| AC-JOB-08 | Progress is persisted, monotonic and reaches 100 only with `completed`.                                                                                                                | unit, integration                                                                 |
-| AC-JOB-09 | Terminal `completed`, `failed` or `cancelled` never returns to running.                                                                                                                | unit                                                                              |
-| AC-JOB-10 | Provider wait persists operation ID and resumes polling without blind resubmission.                                                                                                    | provider sandbox, restart/recovery                                                |
-| AC-JOB-11 | Per-scene narration failure/retry does not redo completed scene artifacts.                                                                                                             | provider sandbox, restart/recovery                                                |
-| AC-JOB-12 | Logs/file existence cannot change canonical Job state during restart/reconciliation.                                                                                                   | integration                                                                       |
-| AC-JOB-13 | Lease expiry in `waiting_provider` preserves operation ID/state; a new polling lease resumes polling without provider resubmission.                                                    | provider sandbox, restart/recovery                                                |
-| AC-JOB-14 | Lease expiry in `cancel_requested` preserves that state while another worker acquires cleanup lease and records `cancelled` or typed `failed`.                                         | restart/recovery                                                                  |
-| AC-JOB-15 | JobStep states are exactly pending, running, waiting_provider, retry_scheduled, completed, skipped, cancelled and failed; terminal steps never reopen.                                 | unit, contract                                                                    |
-| AC-JOB-16 | Retryable JobStep follows `running                                                                                                                                                     | waiting_provider -> retry_scheduled -> pending -> running`; `failed` is terminal. | unit, integration |
-| AC-JOB-17 | Narration has one parent step and unique child items keyed by sceneId; the parent completes only after all required items complete or validly skip.                                    | integration, provider sandbox                                                     |
-| AC-JOB-18 | GenerationJob has zero or many same-Project child RenderJobs via parentJobId; standalone rerender has no parent and reuse requires the full identity/version/provider contract.        | contract, authorization                                                           |
+| ID        | Given / when / then                                                                                                                                                                    | Planned test                       |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| AC-JOB-01 | Accepted generation creates a unique opaque Job ID, idempotency record and durable `queued` state before response.                                                                     | integration                        |
+| AC-JOB-02 | Application restart does not lose an accepted Job/Step record.                                                                                                                         | restart/recovery                   |
+| AC-JOB-03 | Expired `running` lease permits reconciler `running -> queued` only for non-terminal checkpoint-resumable/idempotent work without an active provider operation; old-owner writes fail. | restart/recovery, concurrency      |
+| AC-JOB-04 | Two workers cannot commit the same Step under one lease version.                                                                                                                       | concurrency, integration           |
+| AC-JOB-05 | Replaying a completed Step does not duplicate provider operation/artifact.                                                                                                             | integration, provider sandbox      |
+| AC-JOB-06 | Same idempotency key/request returns existing Job; different request returns `IDEMPOTENCY_CONFLICT`.                                                                                   | contract, integration              |
+| AC-JOB-07 | Cancel request follows allowed transitions and invalid states return `JOB_NOT_CANCELLABLE`.                                                                                            | unit, integration                  |
+| AC-JOB-08 | Progress is persisted, monotonic and reaches 100 only with `completed`.                                                                                                                | unit, integration                  |
+| AC-JOB-09 | Terminal `completed`, `failed` or `cancelled` never returns to running.                                                                                                                | unit                               |
+| AC-JOB-10 | Provider wait persists operation ID and resumes polling without blind resubmission.                                                                                                    | provider sandbox, restart/recovery |
+| AC-JOB-11 | Per-scene narration failure/retry does not redo completed scene artifacts.                                                                                                             | provider sandbox, restart/recovery |
+| AC-JOB-12 | Logs/file existence cannot change canonical Job state during restart/reconciliation.                                                                                                   | integration                        |
+| AC-JOB-13 | Lease expiry in `waiting_provider` preserves operation ID/state; a new polling lease resumes polling without provider resubmission.                                                    | provider sandbox, restart/recovery |
+| AC-JOB-14 | Lease expiry in `cancel_requested` preserves that state while another worker acquires cleanup lease and records `cancelled` or typed `failed`.                                         | restart/recovery                   |
+| AC-JOB-15 | JobStep states are exactly pending, running, waiting_provider, retry_scheduled, completed, skipped, cancelled and failed; terminal steps never reopen.                                 | unit, contract                     |
+| AC-JOB-16 | Retryable JobStep follows running or waiting_provider → retry_scheduled → pending → running; failed is terminal.                                                                       | unit, integration                  |
+| AC-JOB-17 | Narration has one parent step and unique child items keyed by sceneId; the parent completes only after all required items complete or validly skip.                                    | integration, provider sandbox      |
+| AC-JOB-18 | GenerationJob has zero or many same-Project child RenderJobs via parentJobId; standalone rerender has no parent and reuse requires the full identity/version/provider contract.        | contract, authorization            |
 
 ## Composition and preview
 
