@@ -14,7 +14,7 @@ MVP is a closed beta. A Google-authenticated new user is `pending`, an admin app
 6. Structured CompositionVersion editor for scene text/duration/order/assets, voice, caption, aspect ratio, BGM and allowlisted style fields.
 7. Read-only parity preview.
 8. Omnivoice narration through adapter; caption `Clean`/`Bold`; manual BGM Asset, volume and basic ducking.
-9. Modal-only hosted final render, mandatory technical gate and immutable RenderOutput.
+9. Modal-only hosted final render, mandatory technical gate, and RenderOutput with immutable identity/bytes/media metadata/lineage plus guarded lifecycle.
 10. Authorized playback/download after verification.
 11. Minimal admin user review, safe failed-job diagnostics, provider credential references/health and quota policy.
 12. Single HF Docker Space topology, validation-gated deployment, build identity, health/readiness and structured telemetry.

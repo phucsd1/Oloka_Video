@@ -9,8 +9,10 @@ Generation and render need the same lease, heartbeat, retry, cancellation, idemp
 
 ## Decision
 
-Use one logical durable Job aggregate with `jobType`. `GenerationJob` and `RenderJob` are typed subtypes; `JobStep` references the base Job. RenderJob retains its own typed render request/provider/output contract and may be a child of GenerationJob.
+Use one logical durable Job aggregate with `jobType` and nullable `parentJobId`. `GenerationJob` always has no parent and may have zero or many child RenderJobs; a generation-created RenderJob points to its GenerationJob, while standalone rerender has no parent. Parent and child share Project authorization and lineage.
+
+JobStep has the explicit states and guarded transitions in `JOB_STATE_MACHINE.md`. Per-scene narration uses child JobStep items keyed by scene ID. Lease reconciliation may return expired safe `running` work to the queue, but preserves `waiting_provider` operation identity and preserves `cancel_requested` while cleanup is reacquired.
 
 ## Consequences
 
-One dispatcher/state machine handles both while type-specific handlers remain separate. RAM, logs and file existence are never canonical. Terminal transitions, progress and provider operation reuse follow `JOB_STATE_MACHINE.md`.
+One dispatcher/state machine handles both while type-specific handlers remain separate. RAM, logs and file existence are never canonical. Late workers lose commit rights. Terminal transitions, progress, child reuse, checkpoints and provider operation reuse follow `JOB_STATE_MACHINE.md`.

@@ -2,14 +2,14 @@
 
 ## Actors
 
-| Actor                  | Product access                                                                                |
-| ---------------------- | --------------------------------------------------------------------------------------------- |
-| Visitor                | Landing, health/version as public policy permits, Google OAuth entry/callback                 |
-| Pending user           | Own pending/account state and logout only                                                     |
-| Active member          | Own Projects, Assets, CompositionVersions, Jobs, verified RenderOutputs and effective quota   |
-| Disabled/rejected user | No product routes; minimum account/logout surface only                                        |
-| Admin                  | User lifecycle, safe job operations, credential references/health, quota and safe audit views |
-| System worker          | Lease-scoped job/resource operations and scheduled purge only                                 |
+| Actor                  | Product access                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Visitor                | Landing, health/version as public policy permits, Google OAuth entry/callback                                      |
+| Pending user           | Own pending/account state and logout only                                                                          |
+| Active member          | Own Projects, Assets, CompositionVersions, Jobs, deliverable `verified + active` RenderOutputs and effective quota |
+| Disabled/rejected user | No product routes; minimum account/logout surface only                                                             |
+| Admin                  | User lifecycle, safe job operations, credential references/health, quota and safe audit views                      |
+| System worker          | Lease-scoped job/resource operations and scheduled purge only                                                      |
 
 ## Product permission summary
 

@@ -16,7 +16,7 @@
 - DUR-01: Application restart preserves every accepted Job/Step record and re-dispatches eligible work after lease expiry.
 - DUR-02: A completed Step replay does not create duplicate provider operations or artifacts.
 - DUR-03: Database is canonical for lifecycle; object/file/log/RAM state cannot independently mark work complete.
-- DUR-04: CompositionVersion and RenderOutput are immutable; retries never overwrite them.
+- DUR-04: CompositionVersion is immutable; RenderOutput identity, bytes, media metadata and lineage are immutable, while lifecycle/review changes are guarded and retries never overwrite the core.
 - DUR-05: Soft-deleted Projects restore within the retention window; purge is a durable audited system job.
 - DUR-06: Storage and DB coordination uses idempotency and transaction/outbox or reconciliation semantics.
 

@@ -19,13 +19,17 @@ There is one preview contract and one final-render contract sharing the same mat
 
 Preview is read-only and renders the currently selected CompositionVersion. Any editor change creates a new version first. Preview may use a lower execution scale for responsiveness only when timing/layout semantics remain identical and the difference is declared in preview metadata. It never mutates canonical content or resolves missing dependencies differently from render.
 
-## Preflight and manifests
+## Preflight, manifests, and canonical lineage
 
-Before preview or render, the system validates supported versions, resolves all dependencies, fonts and assets, verifies ownership/readiness/checksums, and materializes a content-addressed bundle. The parity fingerprint hashes the version identifiers and manifests. Preview metadata, RenderJob, and RenderOutput record that fingerprint.
+Before preview or render, the system validates supported versions, resolves all dependencies, fonts, captions and assets, verifies ownership, `ready + active` status and checksums, and materializes a content-addressed bundle.
+
+Canonical render lineage consists of `bundleChecksum`, `compositionSchemaVersion`, `renderProtocolVersion`, `rendererVersion`, `hyperframesVersion`, `dependencyManifestHash`, `assetManifestHash`, `fontManifestHash`, and `captionManifestHash`. `renderContractFingerprint` is a deterministic hash of a canonically serialized, versioned structure containing exactly those values. The serialization order, normalization rules, and hash algorithm are fixed by `renderProtocolVersion`.
+
+Preview metadata, preflight, RenderJob, and RenderOutput record and compare the same fingerprint. Lineage scalars/hashes are stored directly in the immutable output snapshot; the bundle and larger immutable manifests are referenced by hash. A provider adapter rejects incompatible protocol versions or any lineage mismatch before submission.
 
 ## Drift prevention
 
-- A mismatch in schema, dependency, font, caption, renderer, HyperFrames, protocol, or asset checksum fails with a typed error; no silent fallback.
+- A mismatch in schema, dependency, font, caption, renderer, HyperFrames, protocol, bundle, asset checksum, or render contract fingerprint fails with a typed error; no silent fallback.
 - Modal performs a capability/version handshake before accepting the bundle.
 - Font fallback is forbidden unless explicitly included in the versioned manifest.
 - Registry dependencies are fully materialized before narration/render submission.
@@ -33,4 +37,4 @@ Before preview or render, the system validates supported versions, resolves all 
 
 ## Acceptance evidence
 
-Contract tests assert identical fingerprints and materialization inputs. Provider-sandbox tests assert Modal rejects incompatible protocol/runtime versions. Visual fixtures cover layout, safe margins, wrapping, BGM/voice timing, and reduced-motion UI behavior (the rendered composition itself follows its explicit motion contract).
+Contract tests assert deterministic fingerprints and identical lineage/materialization inputs across preview, preflight, adapter, and verification. Provider-sandbox tests assert Modal rejects incompatible protocol/runtime versions and mismatched lineage. Visual fixtures cover layout, safe margins, wrapping, BGM/voice timing, and reduced-motion UI behavior (the rendered composition itself follows its explicit motion contract).

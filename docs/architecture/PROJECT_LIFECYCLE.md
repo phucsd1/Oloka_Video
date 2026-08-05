@@ -12,7 +12,7 @@ stateDiagram-v2
   purge_scheduled --> soft_deleted: restore before purge lease
   purge_scheduled --> purging: system job acquires lease
   purging --> purge_scheduled: retryable purge failure
-  purging --> purged: canonical references and bytes removed
+  purging --> purged: manifest complete; minimal tombstone retained
   purged --> [*]
 ```
 
@@ -26,12 +26,14 @@ stateDiagram-v2
 | Soft delete      | Set `status=soft_deleted`, `deletedAt=now`, `purgeAfter=now+30d`; hide from active list; do not recursively delete bytes in request.                                        |
 | Restore          | Owner restores before purge lease starts; clear deletion timestamps as policy specifies; verify dependent resources asynchronously when needed.                             |
 | Retention expiry | Scheduler creates idempotent purge job and moves to `purge_scheduled`.                                                                                                      |
-| Purge            | System worker with lease removes dependent storage using manifests, preserves required audit tombstone, and marks `purged`.                                                 |
+| Purge            | System worker with lease removes dependent private bytes and active domain records by manifest, retains the minimal Project tombstone and audit trail, and marks `purged`.  |
 | Purge failure    | Keep `purge_scheduled`, record typed safe error, retry with backoff; never report purged while objects remain unaccounted for.                                              |
 
 ## Concurrency and audit
 
 Restore and purge acquisition use an atomic state/version guard. Once `purging` begins, ordinary restore is rejected with a stable conflict. Every create, rename, favorite, delete, restore, schedule, purge attempt, failure, and completion produces an AuditEvent. Purge audit metadata includes policy/version and counts/checksums, not storage paths.
+
+After purge, the canonical Project row is a non-restorable tombstone containing opaque `id`, owner reference or privacy-safe owner lineage, `status=purged`, `purgedAt`, `retentionPolicyVersion`, and safe audit references. User-facing presentation fields may be redacted. Purge removes dependent private bytes and active domain records according to the durable manifest, but it never removes the audit trail needed to explain the action.
 
 ## Prohibitions
 

@@ -24,22 +24,22 @@ Acceptance criteria IDs refer to `ACCEPTANCE_CRITERIA.md`.
 | Empty         | Empty Project List offers create; empty Project offers upload/prompt; preview/render disabled until prerequisites exist                                                                            |
 | Error         | Typed error shows failed step, correlation ID, safe message, suggested action and retry eligibility                                                                                                |
 | Retry         | Upload retry, job checkpoint retry, render retry, or edit new version according to state machine; no duplicate artifact                                                                            |
-| Authorization | Every resource is owner-scoped; Asset must be ready/same Project; quota admission precedes job acceptance                                                                                          |
+| Authorization | Every resource is owner-scoped; Asset must be `ready + active` in the same Project; quota admission precedes job acceptance                                                                        |
 | Audit         | Project create/update, upload lifecycle, job commands, version creation, output delivery capability                                                                                                |
-| Criteria      | AC-PROJ-01..09, AC-ASSET-01..10, AC-JOB-01..12, AC-COMP-01..09, AC-RENDER-01..11                                                                                                                   |
+| Criteria      | AC-PROJ-01..10, AC-ASSET-01..14, AC-JOB-01..18, AC-COMP-01..09, AC-RENDER-01..18                                                                                                                   |
 
 ## UF-03 Error recovery
 
-| State         | Contract                                                                                               |
-| ------------- | ------------------------------------------------------------------------------------------------------ |
-| Happy         | Job failed → safe error/failed step → eligibility → retry from validated durable checkpoint → continue |
-| Loading       | Retry is `queued/retry_scheduled`; attempt shown separately; progress never falls                      |
-| Empty         | If no safe checkpoint exists, UI proposes a new generation rather than fake resume                     |
-| Error         | Non-retryable/exhausted errors explain required input/admin action; no secret/path/stack               |
-| Retry         | Idempotency prevents duplicate jobs/steps/outputs; expired lease permits a new worker                  |
-| Authorization | Only requester/owner can command; admin views safe diagnostics but does not impersonate owner          |
-| Audit         | Cancel/retry, lease recovery, provider failure category, terminal outcome                              |
-| Criteria      | AC-JOB-02..12, AC-ERR-01..06, AC-OBS-01..04                                                            |
+| State         | Contract                                                                                                                                 |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Happy         | Job failed → safe error/failed step → eligibility → retry from validated durable checkpoint → continue                                   |
+| Loading       | Retry is `queued/retry_scheduled`; attempt shown separately; progress never falls                                                        |
+| Empty         | If no safe checkpoint exists, UI proposes a new generation rather than fake resume                                                       |
+| Error         | Non-retryable/exhausted errors explain required input/admin action; no secret/path/stack                                                 |
+| Retry         | Idempotency prevents duplicates; expired `running` work resumes only when safe, while provider polling and cleanup preserve their states |
+| Authorization | Only requester/owner can command; admin views safe diagnostics but does not impersonate owner                                            |
+| Audit         | Cancel/retry, lease recovery, provider failure category, terminal outcome                                                                |
+| Criteria      | AC-JOB-02..18, AC-ERR-01..06, AC-OBS-01..04                                                                                              |
 
 ## UF-04 Project deletion and restore
 
@@ -52,7 +52,7 @@ Acceptance criteria IDs refer to `ACCEPTANCE_CRITERIA.md`.
 | Retry         | Owner retries restore before purge; system retries purge idempotently                                         |
 | Authorization | Owner may soft-delete/restore own Project; only system worker may purge                                       |
 | Audit         | Delete, restore, purge schedule/start/failure/completion                                                      |
-| Criteria      | AC-PROJ-04..09, AC-RET-01..07                                                                                 |
+| Criteria      | AC-PROJ-04..10, AC-RET-01..11                                                                                 |
 
 ## UF-05 Admin operations
 

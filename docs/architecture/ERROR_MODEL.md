@@ -15,6 +15,7 @@ HTTP status applies to synchronous commands/queries. Asynchronous jobs store the
 | `AUTHORIZATION_DENIED`      |  403 | No                               | Không có quyền; quay lại tài nguyên của bạn                | Warn; investigate repeated probes          |
 | `ACCOUNT_PENDING`           |  403 | Yes after approval               | Tài khoản đang chờ duyệt; chờ hoặc liên hệ admin           | Info; admin may review                     |
 | `ACCOUNT_DISABLED`          |  403 | No                               | Tài khoản đã bị khóa; liên hệ admin                        | Warn; admin required                       |
+| `ACCOUNT_REJECTED`          |  403 | No unless admin changes status   | Tài khoản không được phê duyệt; liên hệ admin nếu cần      | Info/Warn; admin status change required    |
 | `QUOTA_EXCEEDED`            |  429 | Yes after capacity/action        | Đã vượt giới hạn; giảm dung lượng hoặc chờ job khác        | Info/metric; admin only for policy issue   |
 | `PROJECT_NOT_FOUND`         |  404 | No                               | Không tìm thấy project; tải lại danh sách                  | Info; no admin                             |
 | `PROJECT_DELETED`           |  409 | Yes after restore                | Project đang ở thùng rác; khôi phục trong thời hạn         | Info; no admin                             |
@@ -44,3 +45,4 @@ HTTP status applies to synchronous commands/queries. Asynchronous jobs store the
 3. Retryability is contextual and bounded by job attempt policy; `retryable=true` never means infinite retry.
 4. `QUALITY_GATE_FAILED` is distinct from `RENDER_FAILED`: rendered bytes may exist but cannot be published.
 5. Cancellation is not represented as generic failure; job state becomes `cancelled` and may expose `CANCELLED` as the operation result.
+6. A rejected User always maps to `ACCOUNT_REJECTED`, distinct from `ACCOUNT_DISABLED`; only an admin status change can make the same request eligible.

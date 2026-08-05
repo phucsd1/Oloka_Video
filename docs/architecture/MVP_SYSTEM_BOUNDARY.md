@@ -26,7 +26,7 @@ The hosted MVP is one GitHub-to-GitHub-Actions-to-Hugging-Face Docker Space topo
 - Private project assets, upload/ingestion, technical metadata and basic search.
 - Prompt/config input, durable generation/render jobs, structured composition versions.
 - Read-only preview, basic structured editor, captions, voice, manual BGM/volume/ducking.
-- Modal render, technical gate, immutable output playback/download.
+- Modal render, technical gate, immutable output core, guarded output lifecycle, and authorized playback/download.
 - Admin users, safe failed-job diagnostics, provider credential references/health, quota policy and audit.
 
 ## Explicitly outside

@@ -9,8 +9,8 @@ Mutable current HTML and competing editor/pipeline writes prevent reliable linea
 
 ## Decision
 
-Generation and every edit create an immutable, monotonically numbered CompositionVersion with structured document and frozen dependency/font/runtime manifests. Project selects a current version transactionally.
+Generation and every edit create an immutable, monotonically numbered CompositionVersion with structured document and frozen dependency, asset, font, caption and runtime manifests. Materialization deterministically derives the canonical render lineage and fingerprint defined by the render protocol. Project selects a current version transactionally.
 
 ## Consequences
 
-Preview, render, diagnostics and outputs identify an exact version. Rollback means selecting/deriving a new current version, never mutating history.
+Preview, render, diagnostics and outputs identify an exact version and compare the same lineage fingerprint. Rollback means selecting/deriving a new current version, never mutating history.

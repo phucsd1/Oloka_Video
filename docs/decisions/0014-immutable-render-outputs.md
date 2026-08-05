@@ -1,4 +1,4 @@
-# ADR 0014: Immutable verified RenderOutput
+# ADR 0014: Immutable RenderOutput core with guarded lifecycle
 
 - Status: Accepted
 - Date: 2026-08-05
@@ -9,8 +9,8 @@ Overwritten current output and file-derived availability cause stale delivery an
 
 ## Decision
 
-Each render result is a new immutable RenderOutput linked to Project, CompositionVersion, RenderJob, storage object/checksum, QA and renderer version. Playback/download is issued only after verified availability and technical pass.
+Each render result creates a RenderOutput with immutable output identity, bytes, media metadata and lineage. Its availability, QA/review, retention and pin fields are guarded mutable lifecycle fields with concurrency controls and audit. Availability and retention use independent state machines. Playback/download is issued only while availability is verified, retention is active and technical QA has passed.
 
 ## Consequences
 
-No mutable `output.mp4` product contract exists. Retry creates/reuses output only under explicit idempotent hash rules. Retention and pinning operate on output entities.
+No mutable `output.mp4` product contract exists. Retry creates/reuses output only under the full Project/version/bundle/request/runtime/protocol/provider/fingerprint identity contract. Purge records retention `purged` plus availability `unavailable`; object existence alone never changes business state.

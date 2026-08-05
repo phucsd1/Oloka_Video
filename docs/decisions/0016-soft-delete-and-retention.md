@@ -9,8 +9,8 @@ Synchronous DB plus recursive filesystem deletion is not recoverable or transact
 
 ## Decision
 
-Project/Asset deletion is soft. Projects restore for 30 days by default. Retention scheduling and byte purge are separate durable leased system jobs with idempotency, retries and AuditEvents. Pinned outputs are protected.
+Project/Asset deletion is soft. Asset ingestion and lifecycle are independent. Projects restore for 30 days by default. Retention scheduling and byte purge are separate durable leased system jobs with idempotency, retries and AuditEvents. RenderOutput retention is independent from availability, and pinned outputs are protected from automatic purge scheduling.
 
 ## Consequences
 
-HTTP deletion never recursively deletes bytes. Restore/purge races use guarded states. Failed purge remains visible/retryable; policy defaults are defined in `RETENTION_POLICY.md`.
+HTTP deletion never recursively deletes bytes. Restore/purge races use guarded states. Failed purge remains visible/retryable. Completed Project purge retains a privacy-safe, non-restorable tombstone and required audit trail while dependent private bytes/active records are removed by manifest. Policy defaults are defined in `RETENTION_POLICY.md`.
