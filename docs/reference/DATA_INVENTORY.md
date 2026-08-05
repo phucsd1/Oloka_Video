@@ -2,7 +2,7 @@
 
 ## Nguyên tắc
 
-Nguồn audit: AutoCode Video `codex/hf-prod-sync` tại `595ccdfaf45ff83473f2da8fd2c71d491828e5f5`. Tài liệu mô tả entity và vị trí dữ liệu, không sao chép schema.
+Nguồn audit: AutoCode Video `codex/hf-prod-sync` tại `595ccdfaf45ff83473f2da8fd2c71d491828e5f5`. Tài liệu mô tả entity và vị trí dữ liệu, không sao chép schema. Các vị trí dưới đây là `SOURCE_VERIFIED` và `NOT_RUNTIME_VERIFIED`.
 
 ## Ma trận vị trí dữ liệu
 
@@ -40,13 +40,15 @@ Bằng chứng: `scripts/db.js`, `auth.js`, `services/adminAccessPolicy.js`.
 
 ### Project
 
-Mang tên, mô tả, owner, timestamps, favorite/posted/tags, model, aspect ratio, scene count, duration, flags composition/video, render settings và một Studio snapshot JSON. Cùng thông tin được lặp lại trong `meta.json`; file system vẫn được dùng để phát hiện `hasComposition` và `hasVideo`.
+Mang tên, mô tả, owner, timestamps, các field legacy `favorite`/`posted`/tags, model, aspect ratio, scene count, duration, flags composition/video, render settings và một Studio snapshot JSON. Cùng thông tin được lặp lại trong `meta.json`; file system vẫn được dùng để phát hiện `hasComposition` và `hasVideo`. Với Oloka, `favorite` có thể là field đơn giản; `posted` không thuộc MVP và hậu MVP phải được thay bằng entity tương đương `Publication`/`PublishJob`.
 
 Bằng chứng: `scripts/db.js`, `services/projectService.js`, `routes/projects.js`.
 
 ### Asset
 
 Không có entity DB chuẩn. Identity thực tế là filename + asset type + vị trí file. Metadata sidecar có thể gồm kích thước, hash, upload date, tag, description, collection, OCR/transcript/analysis, embedding và trạng thái AI. Điều này làm rename, ownership, versioning và referential integrity yếu.
+
+Trong Oloka MVP, searchable metadata chỉ gồm original filename, media type, upload time, project và optional ingestion status. Semantic/embedding/similar search, AI enrichment, exact/semantic duplicate cleanup, OCR/transcript search và advanced taxonomy đều là hậu MVP.
 
 Bằng chứng: `routes/assets.js`, `services/assetCatalogService.js`, `services/assetAnalysisService.js`, `services/mockAssetAnalysis.js`.
 
@@ -108,6 +110,6 @@ Bằng chứng: `services/forgePipelineService.js`, `services/projectService.js`
 - DB là nguồn sự thật cho User, Project, Asset, CompositionVersion, Job, RenderOutput và ProviderCredential reference.
 - Object storage là nguồn bytes; DB giữ immutable key, checksum, size, owner và lifecycle.
 - Job event/step phải durable; log là evidence, không được dùng để suy luận state chính.
-- Project workspace chỉ là working copy có thể tái tạo, không phải database thứ hai.
+- Runtime working directory của project chỉ là working copy có thể tái tạo, không phải database thứ hai và không đồng nghĩa domain Workspace. Workspace trong Oloka vẫn `UNDECIDED`: Phase 1 chọn entity độc lập hoặc chỉ project list; không dùng `workspace`/`workspace-<user>` hay special project.
 - Secret dùng secret store/envelope encryption; browser không giữ shared production key.
 - Mọi transition có idempotency key và transaction/outbox khi cần phối hợp DB với object storage.

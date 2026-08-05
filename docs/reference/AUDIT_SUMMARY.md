@@ -8,6 +8,16 @@ Nguồn audit: `phucsd1/AutoCode_Video`, branch `codex/hf-prod-sync`, commit `59
 
 Bằng chứng tổng: `server.js`, `public/app.js`, `private/dashboard-shell.html`, `services/forgePipelineService.js`, `services/projectService.js`, `scripts/db.js`, `Dockerfile`.
 
+## Audit limitations
+
+- Audit này chủ yếu dựa trên source inspection tại snapshot nêu trên. Nó xác minh implementation và reachability nhìn thấy trong source, không chứng minh hành vi production.
+- 66 test file trong AutoCode Video được kiểm kê nhưng không được chạy vì repository tham khảo bị giới hạn read-only và test có thể tạo artifact hoặc thay đổi trạng thái.
+- Không thực hiện lời gọi có side effect hoặc phát sinh phí tới provider; không chạy OAuth thật, LLM generation, TTS/Omnivoice, Modal render hoặc social publishing.
+- Không xác minh runtime Hugging Face Storage/delivery hoặc hosted Space trong Phase 0.
+- Không xác minh Cloudflare runtime vì snapshot thiếu Worker source/config cần thiết để tái tạo deployment.
+- Trong toàn bộ bộ tài liệu, `active` hoặc “hoạt động” mặc định chỉ có nghĩa source-level implementation/reachability (`SOURCE_VERIFIED` + `NOT_RUNTIME_VERIFIED`), trừ khi ghi rõ `RUNTIME_VERIFIED` hoặc `PARTIAL_RUNTIME_EVIDENCE`. Phase 0 không gán hai trạng thái runtime này cho feature/integration nào.
+- Implementation status (`FULL`, `PARTIAL`, `MOCK`, `LEGACY`, `UNREACHABLE`, `UNCLEAR`) và verification status (`SOURCE_VERIFIED`, `RUNTIME_VERIFIED`, `NOT_RUNTIME_VERIFIED`, `PARTIAL_RUNTIME_EVIDENCE`) là hai trục độc lập.
+
 ## Các chức năng quan trọng nhất
 
 1. **Prompt-to-video Forge pipeline:** LLM tạo composition, TTS, alignment/caption, HyperFrames validation/render và hậu kiểm. Bằng chứng: `routes/forge.js`, `services/forgePipelineService.js`, `services/forgeQualityService.js`.
@@ -45,7 +55,7 @@ Bằng chứng: `server.js`, `routes/assets.js`, `routes/bgm.js`, `routes/projec
 
 ### 5. Ba topology deployment chồng nhau
 
-HF all-in-one là active path; Modal là render sidecar; Cloudflare frontend/backend/R2/D1 còn scripts nhưng thiếu Worker source/config và có API contract khác. Không nên duy trì song song trong Oloka MVP.
+HF all-in-one là đường chính theo source; Modal là render sidecar; Cloudflare frontend/backend/R2/D1 còn scripts nhưng thiếu Worker source/config và có API contract khác. Không nên duy trì song song trong Oloka MVP.
 
 Bằng chứng: `.github/workflows/deploy-hf-space.yml`, `Dockerfile`, `deploy/modal-renderer/app.py`, `package.json`, `scripts/*cloudflare*`.
 
@@ -87,8 +97,8 @@ Bằng chứng: `routes/projects.js`, `services/jobRuntimeService.js`, `services
 
 ### Critical
 
-- Project filesystem operations thiếu containment thống nhất; local mode có quyền admin. Bằng chứng: `routes/projects.js` so với `services/projectService.js`.
-- Project deletion là DB delete + recursive filesystem delete không có trash/restore/transaction. Bằng chứng: `routes/projects.js`.
+- Project filesystem operations thiếu containment resolver thống nhất trên các đường select, detail, diagnostics, bulk delete, delete, clone, thumbnail và mutation favorite/posted. Đây là kết luận source-level, không phải xác nhận exploit. Bằng chứng: `routes/projects.js` so với `services/projectService.js`.
+- Project deletion là DB delete và recursive filesystem delete tách rời; lỗi DB đôi khi bị bỏ qua, không có trash/restore/shared transaction, còn bulk delete có thể partial success. Không thực hiện destructive PoC. Bằng chứng: `routes/projects.js`.
 
 ### High
 
@@ -111,7 +121,7 @@ Chi tiết và evidence: `KNOWN_FAILURE_MODES.md`.
 
 1. Google OAuth + admin approval/disable.
 2. Canonical Project CRUD với soft delete.
-3. Private asset upload cơ bản vào object storage, technical metadata và asset selection.
+3. Private asset upload cơ bản vào object storage, technical metadata, asset selection và tìm kiếm theo original filename, media type, upload time, project, optional ingestion status.
 4. Prompt composer tối giản: prompt, ratio, caption on/off/style cơ bản, voice.
 5. Durable generation job state machine: plan → composition → TTS/alignment → compile/check → render → verify → completed.
 6. Một OpenAI-compatible LLM adapter, một TTS adapter và HyperFrames version pin.
@@ -125,7 +135,7 @@ Chi tiết và evidence: `KNOWN_FAILURE_MODES.md`.
 ### Hậu MVP
 
 - Full visual Studio/undo-redo, AI multi-turn edit, render history UI đầy đủ.
-- Shared DAM, collections, semantic search/duplicates, AI asset enrichment.
+- Shared DAM, collections, semantic/embedding/similar search, AI enrichment, exact/semantic duplicate cleanup, OCR/transcript search và advanced taxonomy.
 - URL scraping/capture, smart BGM, post-render vision self-heal.
 - Social publishing.
 - Cloudflare alternate topology.
@@ -135,7 +145,7 @@ Chi tiết và evidence: `KNOWN_FAILURE_MODES.md`.
 
 1. MVP có closed beta/waitlist và admin approval hay login là đủ?
 2. Google-only hay thêm GitHub/password?
-3. Project có cần một “workspace mặc định” riêng hay chỉ project list?
+3. Oloka có cần Workspace như một entity độc lập hay Phase 1 bắt đầu chỉ với project list? Kết luận hiện tại là `UNDECIDED`; không được dùng alias `workspace`/`workspace-<user>` hoặc special project để mô phỏng entity này.
 4. MVP cần full visual editor, basic structured scene edit hay chỉ regenerate từ prompt?
 5. Asset là private theo user, shared theo admin, hay cả hai?
 6. URL-to-video/web scraping có nằm trong product promise không?
@@ -147,6 +157,13 @@ Chi tiết và evidence: `KNOWN_FAILURE_MODES.md`.
 12. HF-only topology trong MVP đã được chấp nhận chưa; Cloudflare có chính thức loại khỏi Phase 1 không?
 13. BGM/caption scope tối thiểu là gì?
 14. Mức quota/cost/concurrency theo user cần enforce ngay MVP?
+
+## Các quyết định phạm vi đã làm rõ
+
+- **Workspace:** `UNDECIDED`. Nếu được chọn trong Phase 1, Workspace phải là entity độc lập với ownership/authorization rõ; nếu chưa chọn, bắt đầu từ project list. Không kế thừa alias của AutoCode Video.
+- **Favorite/posted:** `favorite` có thể giữ như một boolean tổ chức đơn giản. `posted` không thuộc MVP và không được dùng làm publish lifecycle; hậu MVP cần entity tương đương `Publication`/`PublishJob`.
+- **Asset Search MVP:** chỉ original filename, media type, upload time, project và optional ingestion status. Semantic/embedding/similar search, AI enrichment, exact/semantic duplicate cleanup, OCR/transcript search và advanced taxonomy là hậu MVP.
+- **API count:** 82 là inventory count, không phải bằng chứng completeness. Node `/health` và Modal `/health` là hai endpoint riêng; hai font route được đếm nhưng `UNREACHABLE` vì router không mount; endpoint nội bộ động của HyperFrames không được đếm.
 
 ## Số liệu audit
 

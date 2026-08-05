@@ -1,6 +1,6 @@
 # User Journeys
 
-Nguồn audit: AutoCode Video `codex/hf-prod-sync` tại `595ccdfaf45ff83473f2da8fd2c71d491828e5f5`. Mỗi journey phân biệt UI với side effect thật.
+Nguồn audit: AutoCode Video `codex/hf-prod-sync` tại `595ccdfaf45ff83473f2da8fd2c71d491828e5f5`. Mỗi journey phân biệt UI với side effect thật. Đây là journey dựng từ source (`SOURCE_VERIFIED`, `NOT_RUNTIME_VERIFIED`), không phải kết quả chạy end-to-end; test file quan sát được cũng không nâng verification status.
 
 ## 1. Đăng nhập
 
@@ -17,14 +17,14 @@ Bằng chứng: `public/index.html`, `public/landing.js`, `auth.js`, `services/h
 
 ## 2. Tạo project
 
-| Trạng thái | Hành vi quan sát được                                                                                                                                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Happy path | Từ Create canvas, người dùng nhập prompt/config và bấm tạo; `/api/forge/start` có thể tự sinh project ID/thư mục, ghi metadata và enqueue job. Có route POST project riêng nhưng dashboard hiện tại không dùng trực tiếp. |
-| Loading    | Nút composer chuyển busy; UI mở Studio và theo dõi queue/status. Project list có skeleton/pagination.                                                                                                                     |
-| Empty      | Create canvas là empty/start state; project list có danh sách rỗng và load-more ẩn.                                                                                                                                       |
-| Error      | Prompt/config thiếu, quá giới hạn queue, tạo folder/DB lỗi hoặc project access denied.                                                                                                                                    |
-| Retry      | Có resume/rerun từ Studio; nếu project chưa được tạo thành công, người dùng submit lại prompt.                                                                                                                            |
-| Dễ nhầm    | “Tạo project” và “tạo video” bị gộp; ID có alias `workspace`, user workspace và project; route project CRUD riêng có contract khác Forge auto-create.                                                                     |
+| Trạng thái | Hành vi quan sát được                                                                                                                                                                                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Happy path | Từ Create canvas, người dùng nhập prompt/config và bấm tạo; `/api/forge/start` có thể tự sinh project ID/thư mục, ghi metadata và enqueue job. Có route POST project riêng nhưng dashboard hiện tại không dùng trực tiếp.                                                |
+| Loading    | Nút composer chuyển busy; UI mở Studio và theo dõi queue/status. Project list có skeleton/pagination.                                                                                                                                                                    |
+| Empty      | Create canvas là empty/start state; project list có danh sách rỗng và load-more ẩn.                                                                                                                                                                                      |
+| Error      | Prompt/config thiếu, quá giới hạn queue, tạo folder/DB lỗi hoặc project access denied.                                                                                                                                                                                   |
+| Retry      | Có resume/rerun từ Studio; nếu project chưa được tạo thành công, người dùng submit lại prompt.                                                                                                                                                                           |
+| Dễ nhầm    | “Tạo project” và “tạo video” bị gộp; ID có alias `workspace`, user workspace và project; route project CRUD riêng có contract khác Forge auto-create. Với Oloka, Workspace là `UNDECIDED`; không được kế thừa alias, Phase 1 phải chọn entity độc lập hoặc project list. |
 
 Bằng chứng: `private/dashboard-shell.html`, `public/app.js`, `routes/forge.js`, `routes/projects.js`, `services/jobRuntimeService.js`.
 
@@ -139,3 +139,5 @@ MVP nên chỉ cam kết một đường rõ ràng:
 `Google login → project list → create project → upload private asset → submit generation job → theo dõi durable progress → preview → chỉnh prompt/scene cơ bản → render → tải immutable output → retry từ step lỗi`.
 
 Admin MVP chỉ cần duyệt/khóa user, xem job lỗi và quản lý provider credentials. DAM nâng cao, social publishing, Cloudflare alternate, visual editor toàn phần và AI asset enrichment để hậu MVP.
+
+Asset Search trong journey MVP chỉ cam kết original filename, media type, upload time, project và optional ingestion status. Semantic/embedding/similar search, exact/semantic duplicate cleanup, OCR/transcript search và advanced taxonomy là hậu MVP. `favorite` có thể giữ như một tín hiệu đơn giản; `posted` không thuộc MVP, và publish lifecycle tương lai cần `Publication`/`PublishJob` tương đương.

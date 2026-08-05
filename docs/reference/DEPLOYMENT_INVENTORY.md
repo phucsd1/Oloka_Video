@@ -2,9 +2,11 @@
 
 ## Kết luận ngắn
 
-Topology production có bằng chứng đầy đủ nhất là: GitHub branch `codex/hf-prod-sync` → GitHub Actions → Docker Hugging Face Space `phucsd/autocode-video` → `/data` persistent storage → Modal render gateway. Cloudflare là một topology alternate/legacy không thể tái tạo từ snapshot audit vì source/config Worker được package scripts tham chiếu nhưng không có trong Git.
+Topology production có bằng chứng source đầy đủ nhất là: GitHub branch `codex/hf-prod-sync` → GitHub Actions → Docker Hugging Face Space `phucsd/autocode-video` → `/data` persistent storage → Modal render gateway. Cloudflare là một topology alternate/legacy không thể tái tạo từ snapshot audit vì source/config Worker được package scripts tham chiếu nhưng không có trong Git.
 
 Nguồn audit: commit `595ccdfaf45ff83473f2da8fd2c71d491828e5f5`.
+
+Mọi kết luận topology ở đây là `SOURCE_VERIFIED` và `NOT_RUNTIME_VERIFIED`. Phase 0 không chạy deploy, không probe Hugging Face/Modal/Cloudflare runtime, không gọi provider và không xác minh storage delivery thực. “Primary/active” chỉ có nghĩa đường được source/config chỉ ra, không có nghĩa runtime đã được chứng minh.
 
 ## Local development
 

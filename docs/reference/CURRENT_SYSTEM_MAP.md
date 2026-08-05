@@ -4,13 +4,41 @@
 
 Tài liệu này là kết quả audit clean-room, chỉ mô tả hành vi và ranh giới hệ thống. Nguồn được khảo sát là `phucsd1/AutoCode_Video`, branch `codex/hf-prod-sync`, commit `595ccdfaf45ff83473f2da8fd2c71d491828e5f5`. Không có mã nguồn nào được chuyển sang Oloka Video.
 
-Các mức xác nhận dùng xuyên suốt bộ tài liệu:
+Phase 0.1 dùng hai trục độc lập. Không được suy ra mức xác minh runtime từ mức hoàn chỉnh implementation.
 
-- **Hoạt động đầy đủ**: có entry point, consumer, xử lý backend, lưu trữ và kiểm thử liên quan.
-- **Hoạt động một phần**: có luồng thật nhưng còn nhánh mock, thiếu durability, thiếu phân quyền hoặc thiếu kiểm chứng end-to-end.
-- **Chỉ UI/mock**: giao diện có mặt nhưng không có side effect tương ứng, hoặc side effect được mô phỏng.
-- **Legacy/duplicate**: còn mã và có thể gọi riêng, nhưng luồng sản phẩm hiện tại dùng đường khác.
-- **Không xác định**: không đủ bằng chứng để khẳng định đang được dùng.
+### Implementation status
+
+- **FULL**: source cho thấy entry point, consumer, backend và persistence/provider wiring tương đối đầy đủ.
+- **PARTIAL**: có implementation thật nhưng thiếu một hoặc nhiều boundary, durability, permission hoặc journey branch.
+- **MOCK**: UI hoặc response mô phỏng; không có side effect thật tương ứng.
+- **LEGACY**: implementation còn tồn tại nhưng luồng sản phẩm chính dùng đường khác.
+- **UNREACHABLE**: implementation tồn tại nhưng không thể đi tới qua application wiring hiện tại, ví dụ router chưa mount.
+- **UNCLEAR**: source chưa đủ để xác định implementation đang được dùng.
+
+### Verification status
+
+- **SOURCE_VERIFIED**: có bằng chứng source như entry point/route, mount, consumer, backend, persistence/provider wiring hoặc test liên quan. Trạng thái này **không** có nghĩa journey đã chạy thành công.
+- **RUNTIME_VERIFIED**: Phase 0 đã thực sự chạy black-box, integration hoặc end-to-end và quan sát đầu ra đúng.
+- **NOT_RUNTIME_VERIFIED**: có bằng chứng source nhưng Phase 0 chưa chạy hoặc chưa xác minh trong môi trường thực tế.
+- **PARTIAL_RUNTIME_EVIDENCE**: Phase 0 quan sát được một phần runtime nhưng chưa hoàn tất toàn bộ journey/provider flow.
+
+Trong audit này, việc thấy test file chỉ là `SOURCE_VERIFIED`; 66 test files của AutoCode Video không được chạy. Không nhóm AutoCode Video nào dưới đây được nâng thành `RUNTIME_VERIFIED` hoặc `PARTIAL_RUNTIME_EVIDENCE`.
+
+| Nhóm bắt buộc làm rõ          | Implementation status           | Verification status                    | Ghi chú Phase 0                                              |
+| ----------------------------- | ------------------------------- | -------------------------------------- | ------------------------------------------------------------ |
+| Google OAuth                  | FULL có điều kiện cấu hình      | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không chạy login OAuth thật                                  |
+| GitHub OAuth                  | UNCLEAR về consumer             | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Có route nhưng không thấy CTA chính                          |
+| LLM generation                | PARTIAL                         | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không gọi provider thật                                      |
+| Omnivoice TTS                 | FULL ở mức source               | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không tạo TTS job thật                                       |
+| HyperFrames preview           | PARTIAL                         | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không chạy preview journey black-box                         |
+| Modal render                  | FULL ở mức source               | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không tạo render có chi phí                                  |
+| Hugging Face storage delivery | PARTIAL                         | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không kiểm tra object/playback runtime trong Phase 0         |
+| Social publishing             | PARTIAL                         | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không upload lên nền tảng thật                               |
+| Cloudflare alternate topology | UNCLEAR/UNREACHABLE từ snapshot | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Chỉ xác minh scripts tham chiếu; thiếu source/config runtime |
+| AI asset analysis             | PARTIAL/MOCK fallback           | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không gọi recognition provider thật                          |
+| Vision quality analysis       | PARTIAL                         | SOURCE_VERIFIED · NOT_RUNTIME_VERIFIED | Không chạy vision provider thật                              |
+
+Các từ “active”, “hoạt động” hoặc “đầy đủ” còn xuất hiện khi mô tả AutoCode Video chỉ là mô tả **implementation/reachability trong source**, không phải tuyên bố runtime.
 
 ## AutoCode Video thực sự gồm những gì
 
@@ -29,7 +57,7 @@ flowchart LR
     UI --> STATIC["Static project, asset và video"]
 
     API --> SQL["SQLite main DB + activity DB"]
-    API --> FS["Workspace và project directories"]
+    API --> FS["AutoCode working directories và project directories"]
     API --> LIB["Shared asset library"]
     API --> Q["In-memory queue + SSE/polling"]
 
@@ -53,7 +81,7 @@ flowchart LR
 
 ## Thành phần hiện tại
 
-| Thành phần            | Vai trò quan sát được                                                                                         | Trạng thái                                                                        | Bằng chứng                                                                                                                    |
+| Thành phần            | Vai trò quan sát được                                                                                         | Implementation status                                                             | Bằng chứng                                                                                                                    |
 | --------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | Public landing        | Trình bày sản phẩm, Google login và waitlist                                                                  | Hoạt động một phần; nội dung thật, auth phụ thuộc cấu hình hosted                 | `public/index.html`, `public/landing.js`, `public/landing.css`, `services/hostedEntryPolicy.js`                               |
 | Dashboard shell       | Điều hướng Create, Projects, Studio, Assets, Admin và Settings                                                | Hoạt động một phần; shell lớn, nhiều control DAM vượt quá backend                 | `private/dashboard-shell.html`, `public/app.js`, `public/style.css`                                                           |
@@ -124,3 +152,7 @@ Bằng chứng: `routes/projects.js`, `services/projectDiskSnapshot.js`, `servic
 ## Kết luận kiến trúc cho Oloka Video
 
 Giá trị nên giữ là journey prompt-to-video, project artifact có thể kiểm tra, Studio preview/edit và quality gates. Không nên mang sang cấu trúc all-in-one, queue RAM, nhiều nguồn sự thật, secrets ở browser/SQLite plaintext, shared filesystem toàn cục, route legacy trùng pipeline hay deployment Cloudflare không tái tạo được. Oloka nên bắt đầu bằng một modular monolith rõ ownership, một job state machine durable, một storage interface thật và một canonical data model.
+
+### Quyết định Workspace của Oloka
+
+Workspace trong Oloka là `UNDECIDED`. Các path/alias `workspace`, `workspace-<user>` và project đặc biệt trong AutoCode chỉ là bằng chứng về working-directory convention hiện tại, không phải domain model cần kế thừa. Phase 1 phải chọn một trong hai hướng: Workspace là entity độc lập với ID/ownership/authorization rõ, hoặc sản phẩm bắt đầu trực tiếp từ project list. Không được mô phỏng Workspace bằng alias hay special project.
