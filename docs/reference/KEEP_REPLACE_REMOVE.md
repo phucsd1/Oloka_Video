@@ -1,0 +1,91 @@
+# Keep / Replace / Remove / Undecided
+
+Mỗi một trong **56 feature** ở `FEATURE_INVENTORY.md` được gán đúng một nhóm. “KEEP” luôn là giữ hành vi/giá trị sản phẩm, không giữ code AutoCode Video.
+
+## KEEP BEHAVIOR
+
+| Feature                        | Lý do                                  | Giá trị người dùng            | Chi phí             | Dependency                    | Rủi ro                                | MVP                            |
+| ------------------------------ | -------------------------------------- | ----------------------------- | ------------------- | ----------------------------- | ------------------------------------- | ------------------------------ |
+| F-01 Public landing            | Cần entry rõ                           | Hiểu sản phẩm/CTA             | Thấp                | Web                           | Marketing drift                       | MVP                            |
+| F-02 Hosted entry policy       | Luồng landing/dashboard/blocked hợp lý | Entry đúng trạng thái account | Thấp                | Auth                          | Redirect loop                         | MVP                            |
+| F-03 Google OAuth              | Login ít ma sát                        | Vào sản phẩm nhanh            | Trung bình          | Google                        | Provider outage                       | MVP                            |
+| F-06 Waitlist                  | Hữu ích khi closed beta                | Thu lead/quản lý access       | Thấp                | User DB                       | Spam                                  | MVP nếu vẫn closed beta        |
+| F-11 Project list/search       | Core navigation                        | Tìm lại công việc             | Trung bình          | Project DB                    | Pagination/filter inconsistency       | MVP                            |
+| F-14 Select/open project       | Core continuity                        | Tiếp tục project              | Thấp                | Project authorization         | ID confusion                          | MVP                            |
+| F-15 Favorite                  | Tín hiệu tổ chức đơn giản              | Truy cập nhanh                | Thấp                | Project DB                    | “Posted” đang mơ hồ; chỉ giữ favorite | MVP hoặc ngay sau              |
+| F-18 Thumbnail                 | Nhận diện project nhanh                | Scan list dễ                  | Trung bình          | Render/object store           | Generate-on-read                      | Hậu MVP sớm                    |
+| F-19 Diagnostics/report        | Giá trị vận hành cao                   | Hiểu lỗi và retry             | Trung bình          | Job events/artifacts          | Lộ log/secret                         | MVP bản rút gọn                |
+| F-22 Technical asset metadata  | Cần cho validation/render              | Biết file hợp lệ              | Thấp                | Media inspector               | Corrupt media                         | MVP                            |
+| F-28 Asset lock/use            | Giữ asset người dùng yêu cầu           | Output đúng ý                 | Trung bình          | Asset refs/generator contract | Filename mismatch                     | MVP bản đơn giản               |
+| F-33 Select BGM                | Điều khiển đầu ra rõ                   | Chọn/tắt nhạc                 | Thấp                | Asset/audio mix               | License/loudness                      | Hậu MVP sớm                    |
+| F-34 Prompt composer           | Entry core                             | Tạo video dễ                  | Trung bình          | Generation API                | Quá nhiều advanced options            | MVP giản lược                  |
+| F-42 Live preview/safe zone    | Phản hồi nhanh trước render            | Giảm render sai               | Trung bình          | Preview runtime               | Preview/render mismatch               | MVP preview; safe zone hậu MVP |
+| F-46 Caption behavior          | Video social cần caption               | Dễ xem không âm thanh         | Trung bình          | Alignment/fonts               | Vietnamese wrapping                   | MVP 1–2 style                  |
+| F-55 Provider discovery/health | Giảm cấu hình mù                       | Admin biết provider sẵn sàng  | Thấp                | Adapters                      | Health không đại diện quota           | MVP admin                      |
+| F-56 Tests/ops discipline      | Foundation cho shipping                | Ít regression                 | Trung bình liên tục | CI/deploy                     | False confidence nếu thiếu E2E        | MVP                            |
+
+## REPLACE
+
+| Feature                            | Lý do thiết kế lại                         | Giá trị giữ lại                 | Chi phí    | Dependency                    | Rủi ro                        | MVP                                    |
+| ---------------------------------- | ------------------------------------------ | ------------------------------- | ---------- | ----------------------------- | ----------------------------- | -------------------------------------- |
+| F-07 Session/logout                | Token store/cookie policy cần chuẩn hóa    | Phiên đăng nhập an toàn         | Trung bình | Auth DB                       | Session fixation/revocation   | MVP                                    |
+| F-08 User approval/roles           | Cần policy deny-by-default, audit          | Duyệt/khóa/admin                | Trung bình | Authz                         | Last-admin/protected account  | MVP                                    |
+| F-09 Dashboard navigation          | Monolith khó mở rộng                       | Create/Projects/Studio flow     | Trung bình | Web router/design system      | State URL lệch view           | MVP                                    |
+| F-10 Settings shell                | Secret không nên ở localStorage/plain JSON | Admin cấu hình provider         | Cao        | Secret store/adapters         | Secret leakage                | MVP admin tối thiểu                    |
+| F-12 Project creation              | Hai command hiện tại                       | Tạo workspace cho video         | Trung bình | Project DB/storage            | Partial creation              | MVP                                    |
+| F-13 Per-user workspace            | Alias path không phải domain model         | Khu làm việc riêng              | Trung bình | Tenant model                  | Cross-tenant access           | MVP dưới dạng project mặc định nếu cần |
+| F-16 Clone project                 | Copy tree không transaction                | Tạo biến thể nhanh              | Trung bình | Object manifest               | Copy artifact thừa            | Hậu MVP                                |
+| F-17 Delete/bulk delete            | Permanent recursive delete nguy hiểm       | Dọn project                     | Trung bình | Soft delete/storage lifecycle | Data loss                     | MVP soft-delete; purge hậu MVP         |
+| F-20 Shared asset catalog          | Global filesystem/filename identity        | Tái sử dụng media               | Cao        | Asset DB/object store         | Tenant/license                | MVP private catalog; shared hậu MVP    |
+| F-21 Asset upload                  | Raw upload qua app/admin-only              | Đưa media vào project           | Cao        | Object storage/scan           | Quota/malware/partial upload  | MVP                                    |
+| F-23 AI asset analysis             | Mock fallback và RAM queue                 | Search/enrichment               | Cao        | Recognition jobs              | Cost/false metadata           | Hậu MVP                                |
+| F-24 Asset search/filter           | Client-heavy                               | Tìm asset                       | Trung bình | Asset DB/index                | Stale index                   | MVP filename/type; semantic sau        |
+| F-25 Exact duplicate scan          | Permanent cleanup                          | Tiết kiệm storage               | Trung bình | Checksums/trash               | Xóa nhầm                      | Hậu MVP                                |
+| F-26 Semantic duplicate scan       | Embedding coverage yếu                     | Dọn asset giống nhau            | Cao        | Embedding/index               | False positive                | Hậu MVP                                |
+| F-27 Metadata/collection edit      | Sidecar string không đủ                    | Tổ chức asset                   | Trung bình | Asset DB                      | Taxonomy sprawl               | Hậu MVP                                |
+| F-36 Forge generation              | Core nhưng monolithic/nondurable           | Prompt-to-video                 | Rất cao    | LLM, TTS, HyperFrames, jobs   | Cost/state explosion          | MVP theo step state machine            |
+| F-38 HyperFrames contract/registry | Dependency resolution phức tạp             | Composition renderable          | Cao        | HyperFrames registry          | Version/materialization drift | MVP                                    |
+| F-40 Quick scene edit              | Mutation HTML thô                          | Sửa nội dung nhỏ                | Cao        | Structured composition        | Corrupt HTML/conflict         | Hậu MVP                                |
+| F-43 Preview server                | Child process per project trong RAM        | Interactive preview             | Cao        | HyperFrames runtime           | Process/port leaks            | MVP qua isolated bounded preview       |
+| F-44 Omnivoice TTS                 | Giữ provider sau adapter/durable scenes    | Voice + alignment               | Cao        | TTS provider/object store     | Cold start/retry cost         | MVP                                    |
+| F-45 Transcription fallback        | Quá nhiều fallback                         | Timed words khi thiếu alignment | Trung bình | Speech adapter                | Accuracy/runtime              | Hậu MVP; prefer native alignment       |
+| F-47 Smart BGM                     | LLM phụ, không deterministic               | Auto chọn nhạc                  | Trung bình | BGM catalog/LLM               | Cost/license                  | Hậu MVP                                |
+| F-48 Job lifecycle                 | UI tốt nhưng queue không durable           | Progress/cancel/retry           | Rất cao    | Durable queue/events          | Duplicate execution           | MVP                                    |
+| F-50 Modal render                  | Protocol/base64/deadline cần thay          | Hosted render scale             | Cao        | Modal/object store            | Timeout/version/cost          | MVP qua versioned adapter              |
+| F-51 Render history/output         | JSON + copied files dễ drift               | Lịch sử/tải output              | Cao        | RenderOutput DB/object store  | Missing/stale artifacts       | MVP immutable output; history hậu MVP  |
+| F-52 Quality checks                | Nhiều gate/optional vision khó hiểu        | Không giao video hỏng           | Cao        | HyperFrames/media/vision      | False pass/block              | MVP technical gates; vision sau        |
+| F-54 Admin analytics/jobs/cost     | Projection nhiều nguồn                     | Vận hành user/job/cost          | Cao        | Canonical events/pricing      | Sai số/freshness              | MVP user + job failure; analytics sau  |
+
+## REMOVE
+
+| Feature                                | Lý do bỏ                                                  | Giá trị còn lại                                      | Chi phí nếu giữ           | Dependency                       | Rủi ro                        | MVP                                            |
+| -------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------- | ------------------------- | -------------------------------- | ----------------------------- | ---------------------------------------------- |
+| F-05 Password auth local               | Hosted direction dùng OAuth; tăng attack surface          | Local convenience thấp                               | Trung bình                | Password reset/email             | Credential security           | Không                                          |
+| F-29 DAM advanced views                | Phần lớn chỉ UI, chưa có domain                           | Có thể thêm sau khi có nhu cầu                       | Cao                       | Collection/share/trash lifecycle | False affordance              | Không                                          |
+| F-30 Mock background removal           | Báo thành công giả                                        | Không có giá trị thực                                | Trung bình                | Image provider                   | Mất niềm tin/data fiction     | Không đến khi build thật                       |
+| F-31 Mock/heuristic similar tools      | Gắn nhãn AI sai bản chất                                  | Filter tag cơ bản đủ                                 | Trung bình                | Search/embedding                 | False result                  | Không                                          |
+| F-32 Shared BGM upload/delete hiện tại | Global mutation permission lệch; không phải catalog chuẩn | Manual BGM select có thể dùng asset project          | Trung bình                | Shared FS                        | Cross-user deletion           | Không mang implementation; catalog mới hậu MVP |
+| F-37 Legacy direct generation          | Trùng Forge và không có consumer                          | Không                                                | Cao do double maintenance | LLM/assets                       | Fix một đường, hỏng đường kia | Xóa                                            |
+| F-49 Local render như production path  | Hosted dùng Modal; local path thiếu deadline              | Dev utility vẫn có thể tồn tại ngoài product feature | Trung bình                | Chromium/CPU                     | Host exhaustion               | Không là product feature; chỉ dev tooling      |
+
+## UNDECIDED
+
+| Feature                          | Quyết định cần có                                    | Giá trị               | Chi phí         | Dependency                    | Rủi ro                    | Khuyến nghị                               |
+| -------------------------------- | ---------------------------------------------------- | --------------------- | --------------- | ----------------------------- | ------------------------- | ----------------------------------------- |
+| F-04 GitHub OAuth                | Có audience developer cần login GitHub không?        | Login thay thế        | Thấp-trung bình | GitHub OAuth                  | Email/private identity    | Hậu MVP, mặc định bỏ                      |
+| F-35 URL/media ingestion         | Có chấp nhận URL scraping trong product scope không? | Tạo nhanh từ website  | Cao             | Browser/capture/search        | SSRF, copyright, anti-bot | Không MVP                                 |
+| F-39 Full Studio document editor | MVP cần visual editor đến mức nào?                   | Chỉnh sâu composition | Rất cao         | HyperFrames editor/versioning | Scope explosion/conflict  | MVP chỉ preview + regenerate/basic fields |
+| F-41 AI edit/render-only         | Có cần multi-turn edit ngay MVP?                     | Iteration nhanh       | Cao             | Generation checkpoints/jobs   | Cost/state complexity     | Hậu MVP                                   |
+| F-53 Social publishing           | Oloka là creation tool hay creation+distribution?    | Tiết kiệm bước đăng   | Cao             | Platform review/OAuth/jobs    | Token/compliance/quota    | Hậu MVP                                   |
+
+## Kiểm tra coverage
+
+- KEEP BEHAVIOR: 17 feature.
+- REPLACE: 27 feature.
+- REMOVE: 7 feature.
+- UNDECIDED: 5 feature thực (`F-04`, `F-35`, `F-39`, `F-41`, `F-53`).
+- Tổng: 56 feature.
+
+## MVP cut đề xuất
+
+MVP chỉ gồm: Google auth/approval, canonical Project, private Asset upload, prompt composer, durable Forge job, one LLM, Omnivoice, HyperFrames contract, preview, Modal render, technical quality gates, immutable output/download và admin user/job/provider health. Mọi UI chưa có backend thật, social, scraping, Cloudflare alternate, full visual Studio, semantic DAM và smart BGM để sau.
