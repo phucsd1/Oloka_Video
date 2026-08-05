@@ -1,0 +1,39 @@
+{
+  "name": "oloka-video",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The online foundation for Oloka Video.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @oloka/contracts && npm run build -w @oloka/design-system && npm run build -w @oloka/web && npm run build -w @oloka/server",
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w @oloka/server\" \"npm run dev -w @oloka/web\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "npm run typecheck -w @oloka/contracts && npm run typecheck -w @oloka/design-system && npm run typecheck -w @oloka/server && npm run typecheck -w @oloka/web && tsc -p tsconfig.tools.json --noEmit",
+    "test": "npm run test -w @oloka/server && npm run test -w @oloka/web",
+    "test:unit": "npm run test:unit -w @oloka/server",
+    "test:integration": "npm run test:integration -w @oloka/server",
+    "test:frontend": "npm run test -w @oloka/web",
+    "test:e2e": "playwright test",
+    "start": "node apps/server/dist/index.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.32.0",
+    "@playwright/test": "1.62.1",
+    "concurrently": "9.2.0",
+    "eslint": "9.32.0",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "16.3.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.39.0"
+  }
+}

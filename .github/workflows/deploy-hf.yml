@@ -1,0 +1,61 @@
+name: Deploy development Space
+
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    uses: ./.github/workflows/validation.yml
+
+  deploy:
+    needs: validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Hugging Face Hub client
+        run: python -m pip install --disable-pip-version-check huggingface-hub==1.23.0
+      - name: Sync validated commit to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          test -n "$HF_TOKEN"
+          python - <<'PY'
+          import os
+          from datetime import UTC, datetime
+          from time import sleep
+          from huggingface_hub import HfApi
+          from huggingface_hub.errors import HfHubHTTPError
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          repo_id = "phucsd/Oloka-Video-Dev"
+          variables = {
+              "NODE_ENV": "development",
+              "GIT_COMMIT_SHA": os.environ["GITHUB_SHA"],
+              "BUILD_TIMESTAMP": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+          }
+          for key, value in variables.items():
+              for attempt in range(5):
+                  try:
+                      api.add_space_variable(repo_id, key, value)
+                      break
+                  except HfHubHTTPError as error:
+                      if error.response.status_code != 429 or attempt == 4:
+                          raise
+                      sleep(10 * (2 ** attempt))
+
+          api.upload_folder(
+              repo_id=repo_id,
+              repo_type="space",
+              folder_path=".",
+              ignore_patterns=[".git/**", ".git"],
+              delete_patterns="*",
+              commit_message=f"Deploy GitHub commit {os.environ['GITHUB_SHA']}",
+          )
+          PY
