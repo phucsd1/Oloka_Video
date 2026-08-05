@@ -22,7 +22,7 @@ The product ends at download. It has no Workspace, social publishing, global ass
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | PR-01 | Provide a public landing entry with Google login and a clear closed-beta state.                                                                                                            |
 | PR-02 | Support Google OAuth only, with state validation and no anonymous/password/GitHub product access.                                                                                          |
-| PR-03 | Create new users as `pending`; admins can approve, disable, or reject without hard delete.                                                                                                 |
+| PR-03 | Create new users as `pending`; bootstrap exactly the first verified configured admin, preserve at least one active admin, and approve/disable/reject without hard delete.                  |
 | PR-04 | Use revocable secure-cookie sessions backed by hashed server-side session state.                                                                                                           |
 | PR-05 | Route active members directly to an owner-scoped Project List; no Workspace/default project exists.                                                                                        |
 | PR-06 | Support canonical Project create/read/rename with opaque server ID and one owner.                                                                                                          |
@@ -33,7 +33,7 @@ The product ends at download. It has no Workspace, social publishing, global ass
 | PR-11 | Search Assets only by original filename, media type, upload time, Project, ingestion status, and lifecycle/trash context.                                                                  |
 | PR-12 | Capture prompt, aspect ratio, voice, caption, BGM, allowed style fields, and Asset references.                                                                                             |
 | PR-13 | Execute 12-step generation through durable, idempotent Job and JobStep state machines with lease reconciliation and per-scene narration checkpoints.                                       |
-| PR-14 | Expose monotonic progress, current step, safe error, cancellation, and eligible checkpoint retry.                                                                                          |
+| PR-14 | Expose DB-authoritative monotonic progress/current step, safe error, cancellation, and eligible checkpoint retry.                                                                          |
 | PR-15 | Provide a basic structured editor for the explicitly allowlisted composition fields.                                                                                                       |
 | PR-16 | Store every generated or edited CompositionVersion immutably and transactionally select the current version.                                                                               |
 | PR-17 | Provide read-only preview from the selected CompositionVersion using the parity contract.                                                                                                  |

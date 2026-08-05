@@ -4,16 +4,16 @@ Acceptance criteria IDs refer to `ACCEPTANCE_CRITERIA.md`.
 
 ## UF-01 Visitor and closed-beta entry
 
-| State         | Contract                                                                                                          |
-| ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Happy         | Open landing → Google login → validated callback → new/existing User → pending screen or Project List when active |
-| Loading       | Login button disables; callback shows bounded progress without exposing OAuth code/token                          |
-| Empty         | Pending screen explains approval status and logout; no Product navigation                                         |
-| Error         | OAuth state/provider errors use typed safe message and retry login action                                         |
-| Retry         | Start a fresh OAuth state; never reuse failed callback state                                                      |
-| Authorization | Visitor can access OAuth only; pending/disabled/rejected cannot enter product APIs                                |
-| Audit         | Login success/failure category, user creation, approval/disable/reject/session revoke                             |
-| Criteria      | AC-AUTH-01..08, AC-SEC-01..04                                                                                     |
+| State         | Contract                                                                                                                                                                                                    |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Happy         | Open landing → Google login → validated callback → new/existing User → pending screen or Project List when active; only the verified configured identity can bootstrap the first admin when no admin exists |
+| Loading       | Login button disables; callback shows bounded progress without exposing OAuth code/token                                                                                                                    |
+| Empty         | Pending screen explains approval status and logout; no Product navigation                                                                                                                                   |
+| Error         | OAuth state/provider errors use typed safe message and retry login action                                                                                                                                   |
+| Retry         | Start a fresh OAuth state; never reuse failed callback state                                                                                                                                                |
+| Authorization | Visitor can access OAuth only; pending/disabled/rejected cannot enter product APIs                                                                                                                          |
+| Audit         | Login success/failure category, user creation, approval/disable/reject/session revoke                                                                                                                       |
+| Criteria      | AC-AUTH-01..10, AC-SEC-01..04                                                                                                                                                                               |
 
 ## UF-02 Approved member creates and edits a video
 
@@ -56,13 +56,13 @@ Acceptance criteria IDs refer to `ACCEPTANCE_CRITERIA.md`.
 
 ## UF-05 Admin operations
 
-| State         | Contract                                                                                                                            |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Happy         | Login → pending users → approve/disable/reject → failed jobs/safe diagnostics → provider health → credential reference/quota update |
-| Loading       | Independent bounded panels show last refreshed time and degraded dependencies                                                       |
-| Empty         | Explicit empty states for pending users, failed jobs and credential references                                                      |
-| Error         | 403 for non-admin; safe typed DB/provider errors; failed write leaves prior policy/reference active                                 |
-| Retry         | Refresh read models; retry idempotent admin command with audit correlation                                                          |
-| Authorization | Admin policy required; no raw secret read and no blanket private Asset/output access                                                |
-| Audit         | Every user status, credential reference and quota mutation; diagnostic access where policy requires                                 |
-| Criteria      | AC-ADMIN-01..08, AC-AUTHZ-07..12                                                                                                    |
+| State         | Contract                                                                                                                                                                                           |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Happy         | Verified first-admin bootstrap when needed → login → pending users → approve/disable/reject → failed jobs through redacted admin list/detail → provider health → credential reference/quota update |
+| Loading       | Independent bounded panels show last refreshed time and degraded dependencies                                                                                                                      |
+| Empty         | Explicit empty states for pending users, failed jobs and credential references                                                                                                                     |
+| Error         | `AUTHORIZATION_DENIED` for non-admin; last-active-admin conflict prevents lockout; safe typed DB/provider errors; failed write leaves prior policy/reference active                                |
+| Retry         | Refresh read models; retry idempotent admin command with audit correlation                                                                                                                         |
+| Authorization | Admin policy required; owner Project/Composition/Job-history/SSE routes remain denied; no raw secret read or blanket private content access                                                        |
+| Audit         | Every user status, credential reference and quota mutation; diagnostic access where policy requires                                                                                                |
+| Criteria      | AC-ADMIN-01..09, AC-AUTH-09..10, AC-AUTHZ-07..13                                                                                                                                                   |

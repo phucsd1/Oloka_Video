@@ -6,6 +6,14 @@ Every durable mutation that requires later work creates an `outbox_events` row i
 
 Delivery is at least once. Consumers must use the outbox ID or semantic aggregate key as an idempotency key. Exactly-once delivery is not claimed. A consumer claims with a lease, performs its bounded effect outside the claim transaction, then marks published with a guarded update. Retry uses typed backoff; exhausted events become `dead` and page an operator rather than disappearing.
 
+Provider submission uses an intent event, not an operation-ID placeholder. The
+same pre-call transaction stores submission-requested state, semantic request
+hash, provider idempotency-key hash, attempt, and lease/version. The consumer
+calls the provider outside the transaction. Acceptance records the real
+operation ID and waiting state in a second transaction. Unknown outcome keeps
+the intent unresolved and routes to lookup/reconciliation; it cannot trigger an
+immediate blind resubmit.
+
 ## Durable job event stream
 
 `job_events` is the owner-facing event source. Each event has a stable UUID, job-scoped strictly increasing sequence, allowlisted type, safe schema-versioned payload, and epoch-ms time. State mutation and its event are atomic. Events are append-only and retained at least as long as the job.
@@ -14,7 +22,11 @@ Representative types are `job.queued`, `job.started`, `job.progress`, `step.star
 
 ## SSE protocol
 
-`GET /api/v1/jobs/:jobId/events` authenticates and authorizes the job owner/admin. It uses `text/event-stream`, `Cache-Control: no-store`, buffering-disabled headers, and emits `id`, `event`, and JSON `data` from durable rows.
+`GET /api/v1/jobs/:jobId/events` authenticates and authorizes only the job owner.
+Admin diagnostics use the separate redacted admin Job list/detail and never
+subscribe to owner SSE. The owner stream uses `text/event-stream`,
+`Cache-Control: no-store`, buffering-disabled headers, and emits `id`, `event`,
+and JSON `data` from durable rows.
 
 - `Last-Event-ID` resumes after the matching event; an equivalent validated cursor query is allowed for clients that cannot set the header.
 - Server replays retained rows in sequence before tailing new events.

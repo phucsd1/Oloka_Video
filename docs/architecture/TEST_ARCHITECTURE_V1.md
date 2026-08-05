@@ -8,20 +8,20 @@ Normal CI performs no real paid/provider calls and uses no production secrets. A
 
 ## Layers
 
-| Layer                     | Scope                                                                                                           | Examples / acceptance mapping                                                             |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| unit                      | pure domain transitions, Zod schemas, canonicalization, hashes, cursor, redaction, quota arithmetic             | AC-JOB-07-09/15-16, AC-COMP-01/03/06, AC-RENDER-12-13/16, AC-ERR-01-03, AC-QUOTA-01       |
-| repository                | real temporary SQLite, PRAGMAs, constraints, indexes/query plans, row JSON revalidation                         | AC-PROJ-01-03, AC-ASSET-01/06/11-14, AC-JOB-01/04/09, AC-RENDER-08/15                     |
-| migration                 | empty and exact-v1 databases through every version; checksums/failure/restore                                   | AC-DEPLOY-05-06 plus migration strategy matrix                                            |
-| integration               | Fastify injection + real SQLite/temp filesystem + production services with test-only provider adapters          | AC-AUTH-01-07, AC-PROJ-04-10, AC-ASSET-02-09, AC-JOB-01-18, AC-RENDER-03-16, AC-RET-01-11 |
-| authorization/security    | cross-user matrix, CSRF/OIDC/session, path containment, capability scope, upload adversarial cases, redaction   | all AC-AUTHZ, AC-SEC, AC-ADMIN-04/05/07, AC-ERR-03/06                                     |
-| concurrency               | multiple DB connections/process-like dispatchers, `BEGIN IMMEDIATE`, stale versions/leases, quota admission     | AC-JOB-03-05/13-14, AC-QUOTA-02-03, AC-RENDER-15                                          |
-| restart/recovery          | kill after each durable boundary, expired leases, unknown provider outcome, stale upload, backup/restore        | AC-JOB-02/03/05/07/10-14/17, AC-RET-07, AC-DEPLOY-06                                      |
-| provider contract sandbox | deterministic fake server and recorded schema-safe fixtures for timeouts/rate/5xx/invalid/ambiguous/poll/cancel | AC-JOB-05/10-13/17, AC-COMP-08, AC-RENDER-18, AC-ERR-05, AC-DEPLOY-07                     |
-| visual fixture            | deterministic Composition V1 snapshots and short renders at boundary frames/formats                             | AC-CAPTION-01-05, AC-BGM-01/03, AC-COMP-05-09, AC-RENDER-17, AC-NFR-02-04                 |
-| browser E2E               | production-like built app, Google test harness only at explicit auth boundary, complete owner/admin journeys    | AC-AUTH-08, AC-ADMIN-01-06, AC-NFR-01/03/12, core preview/render/delivery flows           |
-| load                      | documented fixture sizes/hardware, p50/p95/p99, warm/cold split, external time excluded                         | AC-NFR-05-09, AC-OBS-04                                                                   |
-| CI/deploy smoke           | source SHA, gates, HF readiness, DB/object persistence across restart                                           | AC-DEPLOY-01-07, AC-OBS-01/03                                                             |
+| Layer                     | Scope                                                                                                                                             | Examples / acceptance mapping                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| unit                      | pure transitions, schemas, canonicalization, hashes, cursor, key separation, error catalog, redaction, quota intervals                            | AC-JOB-07-09/15-16, AC-COMP-01/03/06/10, AC-RENDER-12-13/16, AC-ERR-01-03/07, AC-QUOTA-01 |
+| repository                | real temporary SQLite, PRAGMAs, constraints, indexes/query plans, row JSON revalidation                                                           | AC-PROJ-01-03, AC-ASSET-01/06/11-14, AC-JOB-01/04/09, AC-RENDER-08/15                     |
+| migration                 | empty/exact-v1 through v2-v8; no FK-before-table, partial indexes, checksums/failure/restore/foreign-key checks                                   | AC-DEPLOY-05-06/08 plus migration strategy matrix                                         |
+| integration               | Fastify injection + real SQLite/temp filesystem + production services with test-only provider adapters                                            | AC-AUTH-01-07, AC-PROJ-04-10, AC-ASSET-02-09, AC-JOB-01-18, AC-RENDER-03-16, AC-RET-01-11 |
+| authorization/security    | cross-user/admin-owner-route matrix, bootstrap/last-admin, CSRF/OIDC/session, path containment, capabilities, upload adversarial cases, redaction | all AC-AUTHZ, AC-SEC, AC-AUTH-09/10, AC-ADMIN-04/05/07/09, AC-ERR-03/06/07                |
+| concurrency               | multiple DB connections/process-like dispatchers, `BEGIN IMMEDIATE`, stale versions/leases, quota admission                                       | AC-JOB-03-05/13-14, AC-QUOTA-02-03, AC-RENDER-15                                          |
+| restart/recovery          | kill after each boundary, exact lease recovery, unknown provider intent, upload divergence, authenticated backup/restore                          | AC-JOB-02/03/05/07/10-14/17/19, AC-ASSET-15..17, AC-RET-07, AC-DEPLOY-06/08               |
+| provider contract sandbox | deterministic fake server and recorded schema-safe fixtures for timeouts/rate/5xx/invalid/ambiguous/poll/cancel                                   | AC-JOB-05/10-13/17, AC-COMP-08, AC-RENDER-18, AC-ERR-05, AC-DEPLOY-07                     |
+| visual fixture            | deterministic Composition V1 snapshots and short renders at boundary frames/formats                                                               | AC-CAPTION-01-05, AC-BGM-01/03, AC-COMP-05-09, AC-RENDER-17, AC-NFR-02-04                 |
+| browser E2E               | production-like built app, Google test harness only at explicit auth boundary, complete owner/admin journeys                                      | AC-AUTH-08, AC-ADMIN-01-06, AC-NFR-01/03/12, core preview/render/delivery flows           |
+| load                      | documented fixture sizes/hardware, p50/p95/p99, warm/cold split, external time excluded                                                           | AC-NFR-05-09, AC-OBS-04                                                                   |
+| CI/deploy smoke           | source SHA, gates, HF readiness, DB/object persistence across restart                                                                             | AC-DEPLOY-01-07, AC-OBS-01/03                                                             |
 
 The authoritative criterion list remains `docs/product/ACCEPTANCE_CRITERIA.md`; this is its architectural execution map.
 
@@ -34,6 +34,14 @@ The authoritative criterion list remains `docs/product/ACCEPTANCE_CRITERIA.md`; 
 - all four frame formats and Clean/Bold captions with safe-area edge cases;
 - deterministic provider fake sequences: success, timeout-before/after acceptance, 429 retry, terminal 4xx, malformed body, stuck poll, cancel race;
 - SQLite busy/lease races, process death after object rename/before DB commit, expired leases and outbox events;
+- upload crash after flushed append/before DB commit, DB-ahead-of-file,
+  file-ahead-of-DB, exact last-chunk replay, and required chunk checksum;
+- first-admin bootstrap races, attempted last-active-admin
+  disable/demotion/self-lock, and operator recovery audit without an HTTP route;
+- composition creator by user, by job, and by both; duplicate canonical hashes;
+  root/child JobStep uniqueness; multiple preview artifact generations;
+- provider submission timeout before send, after provider acceptance, and before
+  local acceptance commit, with lookup-before-resubmit proof;
 - missing/orphan/checksum-mismatched objects and verified backup/restore sets.
 
 ## Test-only wiring
@@ -55,3 +63,24 @@ Provider fixtures are minimized, validated, versioned, redacted, and must not co
 5. exact validated commit deployment smoke.
 
 Test sharding must preserve isolation: unique temp DB/storage roots, no shared ports, no dependency on execution order, cleanup in finally hooks, and bounded timeouts. Flaky retries cannot mask invariant failures.
+
+## Phase 2.1 contract consistency gates
+
+Before implementation merge, automated documentation/contract tests must prove:
+
+1. every stable error code named by API, upload, delivery, Job, acceptance, or UI
+   exists in `ERROR_MODEL.md`, and no retired generic/private code is public;
+2. quota/rate mappings are 429, private-resource denial is
+   `RESOURCE_NOT_FOUND`, and admin authorization denial is
+   `AUTHORIZATION_DENIED`;
+3. API capability IDs are sequential, generic Job cancel/retry are unique, and
+   admins cannot consume owner Project/Composition/Job-history/SSE routes;
+4. every Domain Model field is stored or normatively derived by the schema
+   appendix, and v2-v8 never creates an FK before its target table;
+5. preview identity permits immutable artifacts across runtime/CSP changes;
+6. upload initialization/finalization preserves one Asset identity and DB offset
+   remains canonical across both crash-divergence directions;
+7. bootstrap/last-active-admin, provider-intent, dispatcher-expiry, exact Node
+   patch, HKDF contexts, and backup-manifest verification contracts are covered;
+8. all Markdown tables have a consistent number of cells and no raw pipe inside
+   a cell creates a phantom column.

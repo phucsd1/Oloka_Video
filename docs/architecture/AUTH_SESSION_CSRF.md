@@ -6,6 +6,12 @@ MVP supports Google login only, using Authorization Code Flow with PKCE S256, cr
 
 Login initiation creates a short-lived, one-use server-side OAuth transaction containing hashes/validated values for state, nonce, PKCE verifier, intended same-origin return path, and expiry. The callback validates issuer, audience/client ID, signature, expiry, nonce, state, PKCE exchange, and required claims. A previously unknown identity creates a `pending` member; only `active` users may enter product routes. It never accepts an arbitrary post-login redirect or links identities by email alone.
 
+The PKCE verifier is sealed with AES-256-GCM under the current HKDF-derived
+OAuth key. Its stored envelope contains algorithm, unique random 12-byte IV,
+16-byte authentication tag, ciphertext, key version, and transaction expiry.
+Algorithm/version/transaction identity are authenticated additional data.
+Consumed or expired envelopes are purged within 24 hours and never logged.
+
 OAuth state protects the callback transaction; it is separate from application CSRF.
 
 ## Session token
@@ -21,6 +27,11 @@ OAuth state protects the callback transaction; it is separate from application C
 - Logout revokes the current session; security/admin actions can revoke all sessions for a user.
 
 The session token and CSRF token are never stored in localStorage or returned in JSON logs.
+
+Session security metadata stores only a keyed hash of a normalized coarse IP
+prefix and a bounded browser/OS/device-class summary. It never stores a raw IP
+or raw user-agent string, never returns these fields to member/admin APIs, and
+purges them with terminal session retention as defined by the schema.
 
 ## CSRF defense
 
@@ -43,6 +54,26 @@ The browser obtains the synchronizer value from an authenticated, no-store boots
 | SSE                         | GET, authorized, no state mutation; Origin checked to reduce cross-site leakage |
 
 `@fastify/cookie` is planned for parsing/serialization. `@fastify/csrf-protection` was evaluated but is not selected as the authority because the required synchronizer-token lifecycle and Origin policy are application-specific; Phase 3 may reuse vetted primitives only after compatibility/security review.
+
+## First-admin bootstrap and recovery
+
+`OLOKA_BOOTSTRAP_ADMIN_EMAIL` is normalized using the same email policy as the
+User table. During a validated Google callback only, if the verified identity
+email matches and no User row with `role=admin` exists, the identity transaction
+creates or upgrades that User to `role=admin`, `status=active`,
+`approvedAt=now`, and `approvedBy=null` (system), then appends an AuditEvent with
+system actor and action `admin.bootstrap`. The transition and audit commit
+atomically. The bootstrap is permanently ineligible as soon as any admin row
+exists; it is not a local bypass, query parameter, request header, alternate
+login, or client decision. Logs may record only the action/outcome and opaque
+user ID, not the configured email.
+
+Admin disable/reject/demotion and self-lock actions acquire the same guarded
+write transaction and fail with `RESOURCE_STATE_CONFLICT` if they would leave no
+active admin. Emergency recovery is an operator-only maintenance command run in
+a trusted console against the canonical database, never an authenticated or
+unauthenticated HTTP endpoint. It requires explicit target identity and reason,
+enforces verified Google linkage, and appends an immutable system audit event.
 
 ## Failure and audit
 

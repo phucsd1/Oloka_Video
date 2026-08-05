@@ -14,23 +14,31 @@ The MVP object adapter stores durable bytes beneath `/data/objects` and temporar
 
 ## Object lifecycle
 
-| State           | Durable bytes                  | Database visibility                      | Allowed operations                        |
-| --------------- | ------------------------------ | ---------------------------------------- | ----------------------------------------- |
-| staging         | `/data/tmp/<opaque-upload-id>` | upload session only                      | append at expected offset, inspect, abort |
-| verified        | staging                        | not yet an Asset                         | checksum, length, MIME analysis           |
-| active          | `/data/objects/<opaque-key>`   | active Asset/Output/Preview row          | authorized read/range                     |
-| purge_scheduled | durable key retained           | tombstoned resource                      | purge job only                            |
-| purged          | absent                         | state records retained as policy permits | none                                      |
+| State           | Durable bytes                  | Database visibility                                                | Allowed operations                               |
+| --------------- | ------------------------------ | ------------------------------------------------------------------ | ------------------------------------------------ |
+| staging         | `/data/tmp/<opaque-upload-id>` | existing Asset is `upload_pending + active`; UploadSession is open | append at DB-acknowledged offset, inspect, abort |
+| verified        | staging                        | the same Asset exists; UploadSession is verifying                  | checksum, length, MIME analysis                  |
+| active          | `/data/objects/<opaque-key>`   | active Asset/Output/Preview row                                    | authorized read/range                            |
+| purge_scheduled | durable key retained           | tombstoned resource                                                | purge job only                                   |
+| purged          | absent                         | state records retained as policy permits                           | none                                             |
 
 ## Finalize protocol
 
 1. Close the staging handle and flush file data/metadata when required by the platform.
 2. Verify actual size, SHA-256 byte checksum, and allowed MIME evidence outside any database transaction.
 3. Atomically rename on the same filesystem to the fresh opaque key preallocated at Asset/upload initialization; exclusive creation prevents overwrite.
-4. In a short guarded transaction, create/activate the database resource and emit outbox/audit events.
+4. In a short guarded transaction, update the existing Asset identity from
+   upload state to `processing`, complete the UploadSession, and emit the
+   ingestion Job/outbox/audit events. Finalize never creates a second Asset.
 5. If the DB commit fails, remove or quarantine the unreferenced new object through reconciliation; never expose it.
 
 Existing keys are immutable. Replacement creates a new key and resource/version. Writes use exclusive creation; no overwrite is allowed.
+
+For append staging, DB `received_size` is the sole acknowledged offset. Before
+write, contained file length must equal that value. A flushed uncommitted tail is
+truncated back to the DB offset after a crash; the DB is never advanced from file
+length. DB-ahead-of-file is corruption: quarantine, reject, alert High, and
+reconcile/abort without zero-fill.
 
 ## Reconciliation
 

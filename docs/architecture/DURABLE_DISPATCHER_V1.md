@@ -39,7 +39,13 @@ Retry classification is typed: transient network/rate/5xx and verified provider-
 
 At startup and every 30 seconds, reconciliation:
 
-- returns expired locally owned leases to retry scheduling or terminal failure according to policy;
+- returns expired `running` work to `queued` only when its checkpoint is
+  resumable/idempotent and no active provider operation exists; otherwise it
+  records typed failure or policy-approved reconciliation without replay;
+- keeps expired `waiting_provider` in that state with the operation ID intact
+  while atomically acquiring a new polling lease;
+- keeps expired `cancel_requested` in that state while atomically acquiring a
+  new cleanup lease;
 - polls known provider operation IDs before any resubmit;
 - finds jobs whose parent/steps disagree and applies the state-machine invariant;
 - restores released/consumed quota reservations from terminal truth;
@@ -47,6 +53,10 @@ At startup and every 30 seconds, reconciliation:
 - emits safe alerts for repeated lease loss/dead outbox events.
 
 Cancellation is a durable request. The worker observes it between bounded operations, attempts provider cancellation when supported, and commits the state-machine result. An SSE disconnect never cancels work.
+
+An unresolved provider submission intent without an operation ID is reconciled
+by semantic idempotency key/lookup. It is never treated as ordinary expired
+`running` work and never blindly resubmitted.
 
 ## Shutdown
 

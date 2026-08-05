@@ -21,18 +21,36 @@ The migration test fixture must begin from the actual v1 schema, not a reconstru
 
 ## Planned sequence
 
-| Version | Name                  | Purpose                                                                                                             | Phase 3 slice   |
-| ------- | --------------------- | ------------------------------------------------------------------------------------------------------------------- | --------------- |
-| 1       | foundation            | Existing `schema_migrations` and `system_metadata`                                                                  | already present |
-| 2       | persistence-kernel    | checksum-bearing ledger, integer time, metadata normalization, user identity shell, outbox/audit/idempotency kernel | 3A              |
-| 3       | identity-and-security | OAuth identities/transactions, sessions, credential references and identity indexes                                 | 3B              |
-| 4       | canonical-project     | projects, quota policy/reservation foundation                                                                       | 3C              |
-| 5       | private-assets        | assets, upload sessions, delivery capabilities                                                                      | 3D              |
-| 6       | durable-job-kernel    | durable jobs/steps/events and dispatcher indexes                                                                    | 3E              |
-| 7       | compositions-preview  | immutable versions/references and preview artifacts                                                                 | 3F              |
-| 8       | render-outputs        | immutable output core and guarded output state                                                                      | 3H              |
+| Version | Name                  | Purpose                                                                                                                          | Phase 3 slice   |
+| ------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| 1       | foundation            | Existing `schema_migrations` and `system_metadata`                                                                               | already present |
+| 2       | persistence-kernel    | checksum ledger, integer time, metadata normalization, User shell with approval/status evidence, outbox/audit/idempotency kernel | 3A              |
+| 3       | identity-and-security | OAuth identities/AEAD transactions, sessions with redacted security metadata, credential references and identity indexes         | 3B              |
+| 4       | canonical-project     | Project without current-composition pointer; quota policies with effective intervals and reservations                            | 3C              |
+| 5       | private-assets        | Assets including purge timestamps, upload sessions with canonical offset/chunk evidence, delivery capabilities                   | 3D              |
+| 6       | durable-job-kernel    | generic provider-independent Jobs/Steps/Events, submission-intent fields and dispatcher indexes; no composition FKs              | 3E              |
+| 7       | compositions-preview  | immutable versions/references, Project current pointer, generation/composition lineage on Jobs, versioned preview artifacts      | 3F              |
+| 8       | render-outputs        | render-only Job lineage not used before 3H, immutable output core/codecs and guarded output state                                | 3H              |
 
-Version ownership may be split further during Phase 3 review, but ordering and dependencies may not be collapsed into runtime auto-migration.
+Version ownership may be split further during Phase 3 review, but ordering and
+dependencies may not be collapsed into runtime auto-migration. The final schema
+in `DATABASE_SCHEMA_V1.md` shows all columns; this sequence controls when they
+may first exist.
+
+Migration v7 uses this exact dependency order inside its reviewed migration:
+
+1. create `composition_versions` (including nullable User/Job creator lineage);
+2. create `composition_asset_references`;
+3. add/rebuild `projects.current_composition_version_id` with its FK;
+4. add/rebuild generation and composition lineage columns on `jobs`;
+5. create all related indexes, FKs, CHECKs, and same-Project enforcement;
+6. run `foreign_key_check` before ledger commit/readiness.
+
+If a render-only Job column is not consumed until 3H—bundle, render request,
+renderer/protocol/HyperFrames, dimensions, provider credential/operation—its
+introduction belongs to v8, not v7. Migration v4 therefore cannot reference
+`composition_versions`, and v6 cannot contain a FK to it. No migration may
+create a foreign key whose target table does not yet exist.
 
 ## Execution algorithm
 

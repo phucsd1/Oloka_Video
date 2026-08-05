@@ -4,20 +4,23 @@
 
 Generation and render are subtypes of a generic durable Job aggregate. The common aggregate owns state, lease, heartbeat, attempts, idempotency, cancellation, timeout, progress, errors, and JobStep records. `GenerationJob` orchestrates the end-to-end flow; `RenderJob` is created or reused as its child at `submit_render` and can also be requested independently for an existing CompositionVersion.
 
-The canonical queue is persisted. RAM may cache or dispatch work but never determines job state.
+The canonical queue is persisted. `jobs.current_step_key` is the authoritative
+current logical step; logs, file presence, latest event text, and RAM may never
+infer or replace it. RAM may cache or dispatch work but never determines job
+state.
 
 ## Top-level states
 
-| State              | Meaning                                                                           |
-| ------------------ | --------------------------------------------------------------------------------- |
-| `queued`           | Accepted durably and eligible for lease acquisition                               |
-| `running`          | Worker owns an unexpired lease and is executing a local step                      |
-| `waiting_provider` | Durable external operation exists; worker may release compute while polling later |
-| `retry_scheduled`  | Retryable failure has `nextAttemptAt`; not immediately runnable                   |
-| `cancel_requested` | Cancellation intent is durable; cleanup/provider cancellation is pending          |
-| `cancelled`        | Terminal cancellation completed safely                                            |
-| `completed`        | Terminal; every required step completed and output publication contract passed    |
-| `failed`           | Terminal non-retryable or exhausted failure                                       |
+| State              | Meaning                                                                                                        |
+| ------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `queued`           | Accepted durably and eligible for lease acquisition                                                            |
+| `running`          | Worker owns an unexpired lease and is executing a local step                                                   |
+| `waiting_provider` | Durable provider operation exists, or submitted intent has unknown outcome and awaits key-based reconciliation |
+| `retry_scheduled`  | Retryable failure has `nextAttemptAt`; not immediately runnable                                                |
+| `cancel_requested` | Cancellation intent is durable; cleanup/provider cancellation is pending                                       |
+| `cancelled`        | Terminal cancellation completed safely                                                                         |
+| `completed`        | Terminal; every required step completed and output publication contract passed                                 |
+| `failed`           | Terminal non-retryable or exhausted failure                                                                    |
 
 Terminal states are `cancelled`, `completed`, and `failed`.
 
@@ -28,7 +31,7 @@ Terminal states are `cancelled`, `completed`, and `failed`.
 | `queued`           | `running`          | Atomic lease acquisition                                                                                                                                                                         |
 | `queued`           | `cancel_requested` | User/system cancellation before execution                                                                                                                                                        |
 | `running`          | `queued`           | Reconciler only: lease expired, old owner loses commit right, job is non-terminal, no active operation belongs in `waiting_provider`, and the current step is checkpoint-resumable or idempotent |
-| `running`          | `waiting_provider` | Provider operation ID durably recorded                                                                                                                                                           |
+| `running`          | `waiting_provider` | Provider operation ID durably recorded, or outcome-unknown submission intent durably recorded for reconciliation                                                                                 |
 | `running`          | `retry_scheduled`  | Retryable step failure and attempts remain                                                                                                                                                       |
 | `running`          | `cancel_requested` | Cancellation accepted at a safe point                                                                                                                                                            |
 | `running`          | `completed`        | All required steps and invariants pass                                                                                                                                                           |
@@ -47,12 +50,17 @@ All other transitions are forbidden, including any terminal-to-non-terminal tran
 ## Lease expiry, restart, duplicates, and idempotency
 
 - Lease acquisition is compare-and-set on an eligible job and includes `leaseOwner`, `leaseExpiresAt`, lease version, and attempt.
-- The worker heartbeats before a configurable fraction of lease duration. On expiry, the old worker loses all commit rights; every subsequent write must fail its lease/version guard with `CONFLICT`.
+- The worker heartbeats before a configurable fraction of lease duration. On expiry, the old worker loses all commit rights; every subsequent write must fail its lease/version guard with `VERSION_CONFLICT`.
 - An expired `running` job returns to `queued` only through the guarded reconciler transition above. If its checkpoint is not safely resumable/idempotent, reconciliation records a typed failure or schedules policy-approved retry rather than replaying unknown work.
-- An expired `waiting_provider` job remains `waiting_provider` with its `providerOperationId` and provider state intact. Another worker may atomically acquire a polling lease without changing state. Restart never resubmits that operation; the job returns to `running` only after provider completion and atomic acquisition of the completion-work lease.
+- An expired `waiting_provider` job remains `waiting_provider`. A known
+  `providerOperationId` is preserved and a new polling lease continues polling;
+  an outcome-unknown intent without an ID receives a reconciliation lease and
+  looks up by the stable provider key. Neither path resubmits on restart. The job
+  returns to `running` only after provider completion/absence resolution and an
+  atomic completion-work lease.
 - An expired `cancel_requested` job remains `cancel_requested`. Another worker acquires a cleanup lease without changing the state, then records `cancelled` or a typed `failed` result.
 - On restart, dispatchers query canonical eligible states. They do not parse logs or inspect files to reconstruct state.
-- Two workers may race to acquire, but only one lease version can commit a step. Late writes fail with `CONFLICT`.
+- Two workers may race to acquire, but only one lease version can commit a step. Late writes fail with `VERSION_CONFLICT`.
 - Command idempotency returns the existing semantically equivalent job for the same requester/key. Reuse with a different request hash returns `IDEMPOTENCY_CONFLICT`.
 - Step idempotency keys include job, step, logical item, logical input version, and attempt-independent operation identity. Provider operation IDs are persisted before polling.
 
@@ -66,7 +74,7 @@ JobStep states are exactly `pending`, `running`, `waiting_provider`, `retry_sche
 | `pending`          | `skipped`          | Step is optional and a validated skip reason/checkpoint proves it is unnecessary                                         |
 | `pending`          | `cancelled`        | Parent cancellation accepted before work starts                                                                          |
 | `running`          | `pending`          | Reconciler only after lease expiry and only when checkpoint resume or idempotent replay is safe                          |
-| `running`          | `waiting_provider` | Provider operation identity is durably saved                                                                             |
+| `running`          | `waiting_provider` | Provider operation identity or outcome-unknown submission intent is durably saved                                        |
 | `running`          | `retry_scheduled`  | Retryable failure or timeout, attempts remain, and `nextAttemptAt` is persisted                                          |
 | `running`          | `completed`        | Output checkpoint and postconditions pass                                                                                |
 | `running`          | `skipped`          | A runtime-discovered optional condition is validated and recorded                                                        |
@@ -85,7 +93,10 @@ All other JobStep transitions are forbidden. In particular, `failed -> running` 
 Step execution rules:
 
 - Lease and heartbeat fields are guarded exactly like the parent Job. Expiry removes the old worker's commit right.
-- An expired `waiting_provider` step keeps its state, operation ID, and provider checkpoint; a new polling lease keeps the state and never implies provider resubmission.
+- An expired `waiting_provider` step keeps its state and provider checkpoint.
+  When an operation ID exists it is preserved and polled; otherwise the durable
+  outcome-unknown intent is reconciled by idempotency key. A new lease keeps the
+  state and never implies provider resubmission.
 - Timeout produces `retry_scheduled` when policy and attempts permit, otherwise terminal `failed`. Cancellation takes precedence before a new retry lease.
 - A checkpoint may be reused only when its immutable input hash, logical item key, contract version, and postconditions match. Completed or skipped checkpoints cannot be rewritten.
 - Provider polling persists the latest safe status without manufacturing progress. A late worker or provider callback must pass the current lease/version and operation-identity guards.
@@ -102,7 +113,17 @@ The narration parent becomes `completed` only when every required scene item is 
 
 Cancellation is an intent, not an immediate terminal result. Non-interruptible atomic writes finish, then cleanup runs. Provider cancellation is best-effort only when supported; orphaned provider results are quarantined and cannot publish output.
 
-Progress is integer `0..100`, persisted, and monotonic. Each step owns a fixed range. Retries cannot reduce reported progress; they expose attempt separately. `100` is written only with `completed`. Terminal failed/cancelled jobs retain their last progress.
+Progress is persisted as integer basis points `0..10000` and exposed as a
+derived percentage. It is monotonic; each step owns a fixed range. Retries
+cannot reduce reported progress and expose attempt separately. `10000` is
+written only with `completed`. Terminal failed/cancelled jobs retain their last
+progress.
+
+Before a provider call, a guarded transaction records submission-requested
+intent, semantic request hash, stable provider idempotency-key hash, attempt,
+lease/version, and outbox intent without a fabricated operation ID. Acceptance
+stores the real operation ID and `waiting_provider` in a second transaction. An
+unknown outcome is reconciled by key/lookup before policy can permit resubmit.
 
 ## Generation steps
 
@@ -119,7 +140,7 @@ Progress is integer `0..100`, persisted, and monotonic. Each step owns a fixed r
 | 9 `submit_render`             | Preflight-passed bundle and render request      | Child RenderJob ID and provider submission checkpoint                              | 2 transport retries; 2m                     | Cancel before/after submit; render idempotency key; resume by child job/provider ID | Modal adapter; “Gửi render”; provider errors; never skip                                                                                           |
 | 10 `wait_for_render`          | Child RenderJob/provider operation ID           | Terminal provider result or typed failure                                          | Poll retries with backoff; 30m overall      | Cancel requests child/provider cancel; never resubmit blindly; resume polling       | Modal adapter; “Đang render”; provider/render errors; never skip                                                                                   |
 | 11 `verify_output`            | Provider result object, expected media contract | RenderOutput immutable core, lifecycle initialization, and technical QA record     | 1 transient retry; 5m                       | Cancellation cannot publish; checksum/provider result key; resume supported         | Storage/media inspector; “Xác minh video”; `QUALITY_GATE_FAILED`, `ASSET_UNAVAILABLE`; never skip                                                  |
-| 12 `publish_output`           | Verified output and canonical lineage           | `availabilityState=verified`, `retentionState=active`, visible output capability   | Transaction retry; 1m                       | Cancel before commit; output lineage key; resume transactionally                    | No provider; “Hoàn tất”; `CONFLICT`, `STORAGE_UNAVAILABLE`; never skip                                                                             |
+| 12 `publish_output`           | Verified output and canonical lineage           | `availabilityState=verified`, `retentionState=active`, visible output capability   | Transaction retry; 1m                       | Cancel before commit; output lineage key; resume transactionally                    | No provider; “Hoàn tất”; `VERSION_CONFLICT`, `STORAGE_UNAVAILABLE`; never skip                                                                     |
 
 ## GenerationJob and RenderJob relationship
 

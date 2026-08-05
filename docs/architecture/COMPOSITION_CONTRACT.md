@@ -36,7 +36,10 @@ Validation is layered:
 6. Dependency, font, asset, caption, renderer, HyperFrames, and protocol manifest compatibility.
 7. Deterministic materialization preflight.
 
-Failures use `COMPOSITION_INVALID`, `ASSET_UNAVAILABLE`, `DEPENDENCY_MISSING`, `QUOTA_EXCEEDED`, or `CONFLICT`. Safe field paths may be returned; generated source, internal prompts, secrets, and storage paths may not.
+Failures use `COMPOSITION_INVALID`, `ASSET_UNAVAILABLE`, `DEPENDENCY_MISSING`,
+`QUOTA_EXCEEDED`, `RESOURCE_STATE_CONFLICT`, or `VERSION_CONFLICT`. Safe field
+paths may be returned; generated source, internal prompts, secrets, and storage
+paths may not.
 
 ## Version creation
 

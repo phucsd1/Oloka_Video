@@ -36,10 +36,16 @@ erDiagram
 | `status`                   | `pending`, `active`, `disabled`, `rejected`           |
 | `role`                     | `member`, `admin`                                     |
 | `approvedAt`, `approvedBy` | Required after approval                               |
-| `disabledAt`               | Set when disabled                                     |
+| `disabledAt`, `rejectedAt` | Set for the matching access-revocation state          |
 | `createdAt`, `updatedAt`   | Audit timestamps                                      |
 
-An authenticated Google identity creates a `pending` user. `disabled` and `rejected` users retain records and audit history. Access revocation does not hard-delete the user.
+An authenticated Google identity normally creates a `pending` user. The sole
+bootstrap exception is the verified Google identity whose normalized email
+matches `OLOKA_BOOTSTRAP_ADMIN_EMAIL`, and only while no admin row exists; its
+system approval has `approvedBy=null` and an `admin.bootstrap` AuditEvent.
+Transitions that would leave no active admin are rejected. `disabled` and
+`rejected` users retain records and audit history. Access revocation does not
+hard-delete the user.
 
 ## OAuthIdentity
 
@@ -51,18 +57,18 @@ Fields: `id`, `userId`, `tokenHash`, `expiresAt`, `revokedAt`, `createdAt`, `las
 
 ## Project
 
-| Field                         | Contract                                                         |
-| ----------------------------- | ---------------------------------------------------------------- |
-| `id`, `ownerId`               | Opaque identity and single owner                                 |
-| `name`, `description`         | Mutable presentation fields                                      |
-| `favorite`                    | List-organization boolean only                                   |
-| `status`                      | `active`, `soft_deleted`, `purge_scheduled`, `purging`, `purged` |
-| `currentCompositionVersionId` | Nullable pointer to an immutable version in this project         |
-| `deletedAt`, `purgeAfter`     | Soft-delete and retention timestamps                             |
-| `purgedAt`                    | Purge completion timestamp; required on the retained tombstone   |
-| `retentionPolicyVersion`      | Policy version that authorized purge                             |
-| `safeAuditReferences`         | Privacy-safe references to append-only purge/audit evidence      |
-| `createdAt`, `updatedAt`      | Audit timestamps                                                 |
+| Field                         | Contract                                                                         |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| `id`, `ownerId`               | Opaque identity and single owner                                                 |
+| `name`, `description`         | Mutable presentation fields                                                      |
+| `favorite`                    | List-organization boolean only                                                   |
+| `status`                      | `active`, `soft_deleted`, `purge_scheduled`, `purging`, `purged`                 |
+| `currentCompositionVersionId` | Nullable pointer to an immutable version in this project                         |
+| `deletedAt`, `purgeAfter`     | Soft-delete and retention timestamps                                             |
+| `purgedAt`                    | Purge completion timestamp; required on the retained tombstone                   |
+| `retentionPolicyVersion`      | Policy version that authorized purge                                             |
+| `safeAuditReferences`         | Derived authorized relation to append-only AuditEvents; not a Project JSON field |
+| `createdAt`, `updatedAt`      | Audit timestamps                                                                 |
 
 Project status is independent of generation/render job status. A project never uses name, slug, storage key, or filesystem path as identity. There is no `posted` field and no special project named `workspace`.
 
@@ -83,7 +89,13 @@ A new Asset is `upload_pending + active`. Only `ready + active` assets are refer
 
 Fields: `id`, `projectId`, `versionNumber`, `schemaVersion`, `document`, `dependencyManifest`, `assetManifest`, `fontManifest`, `captionManifest`, `rendererVersion`, `hyperframesVersion`, `renderProtocolVersion`, `createdByUserId`, `createdByJobId`, `createdAt`.
 
-The entity is immutable. Any structured edit creates the next version transactionally and may update `Project.currentCompositionVersionId`. The canonical `document` is structured data, never arbitrary HTML/CSS/JavaScript.
+The entity is immutable. At least one of `createdByUserId` or `createdByJobId`
+is present; both are allowed, and a creator Job must share the Project.
+Generation does not fabricate a user creator. Any structured edit creates the
+next version transactionally and may update
+`Project.currentCompositionVersionId`. The canonical `document` is structured
+data, never arbitrary HTML/CSS/JavaScript. Identical document hashes may exist as
+distinct versions because audit/version identity is not content deduplication.
 
 ## Job base and GenerationJob
 
@@ -93,7 +105,11 @@ Every Job has: `id`, `jobType`, nullable `parentJobId`, `projectId`, `requestedB
 
 ## JobStep
 
-Fields: `id`, `jobId`, nullable `parentStepId`, nullable `itemKey`, `stepName`, `state`, `attempt`, `inputArtifactReferences`, `outputArtifactReferences`, `providerOperationId`, `idempotencyKey`, `lease`, `timeoutAt`, `errorCode`, `startedAt`, `completedAt`.
+Fields: `id`, `jobId`, nullable `parentStepId`, nullable `itemKey`, `stepName`,
+`state`, `attempt`, `inputArtifactReferences`, `outputArtifactReferences`,
+`providerOperationId`, `providerSubmissionState`, `providerRequestHash`,
+`providerIdempotencyKeyHash`, `providerSubmissionAttempt`, `idempotencyKey`,
+`lease`, `heartbeatAt`, `timeoutAt`, `errorCode`, `startedAt`, and `completedAt`.
 
 Step states are exactly `pending`, `running`, `waiting_provider`, `retry_scheduled`, `completed`, `skipped`, `cancelled`, and `failed`; the last four are terminal. Step artifacts are immutable references. Completed steps cannot be silently rewritten.
 
@@ -137,7 +153,13 @@ Fields: `id`, `actorType`, `actorId`, `action`, `targetType`, `targetId`, `safeM
 
 ## QuotaPolicy
 
-Fields: `id`, `scopeType`, `scopeId`, `limits`, `effectiveFrom`, `effectiveUntil`, `createdBy`, `createdAt`, `updatedAt`. Environment defaults establish the baseline; an active admin policy may override named limits. Routes and UI consume a quota service and never embed limit constants.
+Fields: `id`, `scopeType`, `scopeId`, `limits`, `effectiveFrom`,
+`effectiveUntil`, `createdBy`, `createdAt`, `updatedAt`. Effective intervals are
+non-overlapping and half-open; null `effectiveUntil` is open-ended. Resolution
+selects a matching user override, then a system policy, then environment
+baseline. Policies are append-only versions, so `updatedAt` is normatively the
+creation instant. Routes and UI consume a quota service and never embed limit
+constants.
 
 ## Cross-entity invariants
 
@@ -150,3 +172,5 @@ Fields: `id`, `scopeType`, `scopeId`, `limits`, `effectiveFrom`, `effectiveUntil
 7. Object presence can confirm availability but cannot create or change canonical business state without a guarded transition.
 8. A child RenderJob has exactly one GenerationJob parent; a GenerationJob may have zero or many children. A standalone RenderJob has no parent.
 9. Reuse of a RenderJob or RenderOutput requires an exact match of Project, CompositionVersion, bundle checksum, render request hash, renderer version, render protocol version, and provider operation identity/idempotency contract.
+10. At least one active administrator must remain after every role/status
+    mutation; ordinary HTTP cannot bypass this invariant.

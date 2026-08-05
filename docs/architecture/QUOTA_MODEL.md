@@ -16,7 +16,15 @@
 
 ## Policy resolution
 
-The quota service resolves a versioned effective policy using platform/environment defaults and an optional active admin override. Overrides name individual keys, scope, effective interval, and audit actor. Domain logic asks the service for effective limits; routes, UI, provider adapters, and workers do not hard-code them.
+The quota service resolves a versioned effective policy using
+platform/environment defaults and optional append-only admin policy versions.
+Each interval is half-open `[effectiveFrom,effectiveUntil)`; a null end is
+open-ended, and overlapping intervals for the same scope are rejected. At time
+`t`, a matching user policy wins over a matching system policy, then environment
+baseline applies. Ties are resolved by latest start and stable ID. Overrides
+name individual keys, scope, effective interval, and audit actor. Domain logic
+asks the service for effective limits; routes, UI, provider adapters, and workers
+do not hard-code them.
 
 ## Admission
 

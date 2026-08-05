@@ -20,7 +20,9 @@ Phase 2 converts the accepted Phase 1 product/domain contract into an implementa
 
 - 20 architecture documents created in Phase 2.
 - 10 new ADRs (0017-0026).
-- 74 identified API capabilities, including three stable foundation probes.
+- 72 identified API capabilities, including three stable foundation probes;
+  render cancel/retry use only generic Job commands.
+- 35 canonical public error codes in one authoritative catalog.
 - 23 named transaction boundaries.
 - 25 logical database tables, of which 5 are supporting technical tables.
 - 9 implementation slices (3A through 3I+); only 3A is eligible after review.
@@ -33,6 +35,10 @@ Phase 2 converts the accepted Phase 1 product/domain contract into an implementa
 4. HyperFrames preview/render parity depends on pinned runtime/materializer/assets/fonts and deterministic composition; production cannot depend on Studio's long-running dev server.
 5. Local backups on the same `/data` volume do not protect against volume loss; MVP RPO/RTO and post-MVP external backup require owner confirmation.
 6. Existing foundation schema v1 has a minimal migration ledger; migration v2 must upgrade it from an exact v1 fixture without rewriting history.
+7. Upload DB/filesystem divergence must never advance DB truth or zero-fill
+   missing bytes; both crash directions require quarantine/truncation tests.
+8. First-admin bootstrap and provider submission have race/unknown-outcome
+   boundaries that require atomic guards and durable audit/intent evidence.
 
 ## Product-owner decisions required before 3A
 
@@ -50,3 +56,27 @@ No legacy source, route implementation, prompt, configuration, workflow, HTML/CS
 ## Next gate
 
 Review all Phase 2 documents and ADRs for consistency with Phase 1. After explicit approval, begin only slice 3A from `IMPLEMENTATION_SEQUENCE.md`. Do not begin project/upload/job/preview/render implementation as part of this phase.
+
+## Phase 2.1 reconciliation
+
+Phase 2.1 reconciles—not expands—the accepted MVP. It makes
+`ERROR_MODEL.md` the sole code authority, removes private resource-specific
+not-found codes and duplicate render commands, keeps owner routes owner-only,
+and confines admin Job access to redacted admin surfaces. The final schema now
+maps every Domain Model field, records User approval/status evidence, redacted
+session metadata, Project/Asset purge evidence, dual Composition creator
+lineage, DB-authoritative current Job step, exact JobStep lease/deadline and
+partial-unique identities, output codecs, quota intervals, and upgrade-safe
+preview identity.
+
+Migration order now introduces no FK before its target: v4 has no Composition
+pointer, v6 is a generic Job kernel, v7 creates compositions/references before
+adding Project/Job composition lineage, and v8 owns render-only lineage/output.
+Upload initialization/finalization preserves one Asset, DB offset is canonical,
+provider intent precedes remote submit, and expired dispatcher states keep their
+explicit reconciliation semantics.
+
+Slice 3A must pin the same exact Node 22.16.0 patch in Docker and Actions before
+relying on online backup, derive separate keys from `OLOKA_APP_KEY`, and verify
+canonical HMAC-authenticated backup manifests. Phase 2.1 changes documentation
+only and does not start Slice 3A.

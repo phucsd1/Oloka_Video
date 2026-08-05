@@ -6,33 +6,36 @@ Phase 2 maps these criteria to concrete test layers and fixtures in `docs/archit
 
 ## Authentication
 
-| ID         | Given / when / then                                                                                                                                                  | Planned test               |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| AC-AUTH-01 | Given a visitor, when Google OAuth succeeds for an unknown subject, then one User and OAuthIdentity are created with User `pending`.                                 | integration, E2E           |
-| AC-AUTH-02 | Given a pending user, when any Project API is requested, then `ACCOUNT_PENDING` is returned before resource access.                                                  | authorization              |
-| AC-AUTH-03 | Given an active user, when Project List is requested with a valid session, then only owned Projects are returned.                                                    | integration, authorization |
-| AC-AUTH-04 | Given a disabled user with an unexpired session, when any product API is requested, then `ACCOUNT_DISABLED` is returned.                                             | authorization              |
-| AC-AUTH-05 | Given a rejected user, when product access is attempted, then `ACCOUNT_REJECTED` (403, non-retryable until admin change) is returned and the account record remains. | authorization              |
-| AC-AUTH-06 | Given logout, when the old session cookie is reused, then authentication fails.                                                                                      | integration, security      |
-| AC-AUTH-07 | Given an admin approval/disable/reject action, then status, actor and AuditEvent are persisted atomically.                                                           | integration                |
-| AC-AUTH-08 | Given hosted MVP, then password/GitHub/magic-link/anonymous product entry is absent and unreachable.                                                                 | contract, E2E              |
+| ID         | Given / when / then                                                                                                                                                                                             | Planned test                       |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| AC-AUTH-01 | Given a visitor, when Google OAuth succeeds for an unknown subject, then one User and OAuthIdentity are created with User `pending`.                                                                            | integration, E2E                   |
+| AC-AUTH-02 | Given a pending user, when any Project API is requested, then `ACCOUNT_PENDING` is returned before resource access.                                                                                             | authorization                      |
+| AC-AUTH-03 | Given an active user, when Project List is requested with a valid session, then only owned Projects are returned.                                                                                               | integration, authorization         |
+| AC-AUTH-04 | Given a disabled user with an unexpired session, when any product API is requested, then `ACCOUNT_DISABLED` is returned.                                                                                        | authorization                      |
+| AC-AUTH-05 | Given a rejected user, when product access is attempted, then `ACCOUNT_REJECTED` (403, non-retryable until admin change) is returned and the account record remains.                                            | authorization                      |
+| AC-AUTH-06 | Given logout, when the old session cookie is reused, then authentication fails.                                                                                                                                 | integration, security              |
+| AC-AUTH-07 | Given an admin approval/disable/reject action, then status, actor and AuditEvent are persisted atomically.                                                                                                      | integration                        |
+| AC-AUTH-08 | Given hosted MVP, then password/GitHub/magic-link/anonymous product entry is absent and unreachable.                                                                                                            | contract, E2E                      |
+| AC-AUTH-09 | Given no admin row, a verified Google identity matching normalized `OLOKA_BOOTSTRAP_ADMIN_EMAIL` becomes the first active admin atomically with system audit; after any admin exists the bootstrap is disabled. | integration, concurrency, security |
+| AC-AUTH-10 | Disabling, rejecting, demoting, or self-locking an admin is rejected when it would leave no active admin; recovery is audited operator maintenance with no HTTP route.                                          | integration, authorization         |
 
 ## Authorization
 
-| ID          | Given / when / then                                                                    | Planned test                    |
-| ----------- | -------------------------------------------------------------------------------------- | ------------------------------- |
-| AC-AUTHZ-01 | User A cannot read, update, delete or restore User B's Project.                        | authorization                   |
-| AC-AUTHZ-02 | User A cannot read, update, sign or use User B's Asset.                                | authorization                   |
-| AC-AUTHZ-03 | User A cannot read or edit User B's CompositionVersion.                                | authorization                   |
-| AC-AUTHZ-04 | User A cannot read/cancel/retry User B's GenerationJob or RenderJob.                   | authorization                   |
-| AC-AUTHZ-05 | User A cannot list, play or download User B's RenderOutput.                            | authorization                   |
-| AC-AUTHZ-06 | A traversal-like ID or path field is rejected before any storage adapter call.         | security                        |
-| AC-AUTHZ-07 | A client-supplied storage key never overrides server resolution.                       | security, contract              |
-| AC-AUTHZ-08 | A system worker without a matching unexpired lease cannot update Job/Step/resources.   | authorization, restart/recovery |
-| AC-AUTHZ-09 | An admin read API returns credential metadata/health but never the raw secret.         | authorization, security         |
-| AC-AUTHZ-10 | Credential and quota mutations require admin role and create AuditEvents.              | authorization, integration      |
-| AC-AUTHZ-11 | An admin has no default capability to download a member's private Asset/output.        | authorization                   |
-| AC-AUTHZ-12 | Project/Asset/output purge cannot execute through an ordinary user/admin HTTP request. | architecture, authorization     |
+| ID          | Given / when / then                                                                                                                             | Planned test                    |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| AC-AUTHZ-01 | User A cannot read, update, delete or restore User B's Project.                                                                                 | authorization                   |
+| AC-AUTHZ-02 | User A cannot read, update, sign or use User B's Asset.                                                                                         | authorization                   |
+| AC-AUTHZ-03 | User A cannot read or edit User B's CompositionVersion.                                                                                         | authorization                   |
+| AC-AUTHZ-04 | User A cannot read/cancel/retry User B's GenerationJob or RenderJob.                                                                            | authorization                   |
+| AC-AUTHZ-05 | User A cannot list, play or download User B's RenderOutput.                                                                                     | authorization                   |
+| AC-AUTHZ-06 | A traversal-like ID or path field is rejected before any storage adapter call.                                                                  | security                        |
+| AC-AUTHZ-07 | A client-supplied storage key never overrides server resolution.                                                                                | security, contract              |
+| AC-AUTHZ-08 | A system worker without a matching unexpired lease cannot update Job/Step/resources.                                                            | authorization, restart/recovery |
+| AC-AUTHZ-09 | An admin read API returns credential metadata/health but never the raw secret.                                                                  | authorization, security         |
+| AC-AUTHZ-10 | Credential and quota mutations require admin role and create AuditEvents.                                                                       | authorization, integration      |
+| AC-AUTHZ-11 | An admin has no default capability to download a member's private Asset/output.                                                                 | authorization                   |
+| AC-AUTHZ-12 | Project/Asset/output purge cannot execute through an ordinary user/admin HTTP request.                                                          | architecture, authorization     |
+| AC-AUTHZ-13 | Admin cannot use owner Project/Composition/Job status/history/SSE routes; redacted Job diagnostics exist only under admin list/detail surfaces. | authorization, security         |
 
 ## Projects
 
@@ -67,43 +70,48 @@ Phase 2 maps these criteria to concrete test layers and fixtures in `docs/archit
 | AC-ASSET-12 | Soft delete/restore changes lifecycle only: failed ingestion does not become ready, while `ready + soft_deleted` restores to `ready + active`. | integration                |
 | AC-ASSET-13 | Purge changes lifecycle/byte availability without rewriting the historical ingestion outcome.                                                  | contract, integration      |
 | AC-ASSET-14 | Active-library and trash search apply explicit lifecycle filters and never make a non-`ready + active` Asset referenceable.                    | authorization, integration |
+| AC-ASSET-15 | Every chunk carries a verified checksum; DB `received_size` is canonical and exact offset/size/checksum replay is idempotent.                  | integration, security      |
+| AC-ASSET-16 | A crash after file append but before DB commit truncates the tail to DB offset; DB-ahead-of-file quarantines/alerts and never zero-fills.      | restart/recovery, security |
+| AC-ASSET-17 | Upload initialization creates the one Asset identity; verification/finalize updates that same Asset to processing and never creates another.   | integration                |
 
 ## Jobs
 
-| ID        | Given / when / then                                                                                                                                                                    | Planned test                       |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| AC-JOB-01 | Accepted generation creates a unique opaque Job ID, idempotency record and durable `queued` state before response.                                                                     | integration                        |
-| AC-JOB-02 | Application restart does not lose an accepted Job/Step record.                                                                                                                         | restart/recovery                   |
-| AC-JOB-03 | Expired `running` lease permits reconciler `running -> queued` only for non-terminal checkpoint-resumable/idempotent work without an active provider operation; old-owner writes fail. | restart/recovery, concurrency      |
-| AC-JOB-04 | Two workers cannot commit the same Step under one lease version.                                                                                                                       | concurrency, integration           |
-| AC-JOB-05 | Replaying a completed Step does not duplicate provider operation/artifact.                                                                                                             | integration, provider sandbox      |
-| AC-JOB-06 | Same idempotency key/request returns existing Job; different request returns `IDEMPOTENCY_CONFLICT`.                                                                                   | contract, integration              |
-| AC-JOB-07 | Cancel request follows allowed transitions and invalid states return `JOB_NOT_CANCELLABLE`.                                                                                            | unit, integration                  |
-| AC-JOB-08 | Progress is persisted, monotonic and reaches 100 only with `completed`.                                                                                                                | unit, integration                  |
-| AC-JOB-09 | Terminal `completed`, `failed` or `cancelled` never returns to running.                                                                                                                | unit                               |
-| AC-JOB-10 | Provider wait persists operation ID and resumes polling without blind resubmission.                                                                                                    | provider sandbox, restart/recovery |
-| AC-JOB-11 | Per-scene narration failure/retry does not redo completed scene artifacts.                                                                                                             | provider sandbox, restart/recovery |
-| AC-JOB-12 | Logs/file existence cannot change canonical Job state during restart/reconciliation.                                                                                                   | integration                        |
-| AC-JOB-13 | Lease expiry in `waiting_provider` preserves operation ID/state; a new polling lease resumes polling without provider resubmission.                                                    | provider sandbox, restart/recovery |
-| AC-JOB-14 | Lease expiry in `cancel_requested` preserves that state while another worker acquires cleanup lease and records `cancelled` or typed `failed`.                                         | restart/recovery                   |
-| AC-JOB-15 | JobStep states are exactly pending, running, waiting_provider, retry_scheduled, completed, skipped, cancelled and failed; terminal steps never reopen.                                 | unit, contract                     |
-| AC-JOB-16 | Retryable JobStep follows running or waiting_provider → retry_scheduled → pending → running; failed is terminal.                                                                       | unit, integration                  |
-| AC-JOB-17 | Narration has one parent step and unique child items keyed by sceneId; the parent completes only after all required items complete or validly skip.                                    | integration, provider sandbox      |
-| AC-JOB-18 | GenerationJob has zero or many same-Project child RenderJobs via parentJobId; standalone rerender has no parent and reuse requires the full identity/version/provider contract.        | contract, authorization            |
+| ID        | Given / when / then                                                                                                                                                                       | Planned test                       |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| AC-JOB-01 | Accepted generation creates a unique opaque Job ID, idempotency record and durable `queued` state before response.                                                                        | integration                        |
+| AC-JOB-02 | Application restart does not lose an accepted Job/Step record.                                                                                                                            | restart/recovery                   |
+| AC-JOB-03 | Expired `running` lease permits reconciler `running -> queued` only for non-terminal checkpoint-resumable/idempotent work without an active provider operation; old-owner writes fail.    | restart/recovery, concurrency      |
+| AC-JOB-04 | Two workers cannot commit the same Step under one lease version.                                                                                                                          | concurrency, integration           |
+| AC-JOB-05 | Replaying a completed Step does not duplicate provider operation/artifact.                                                                                                                | integration, provider sandbox      |
+| AC-JOB-06 | Same idempotency key/request returns existing Job; different request returns `IDEMPOTENCY_CONFLICT`.                                                                                      | contract, integration              |
+| AC-JOB-07 | Cancel request follows allowed transitions and invalid states return `JOB_NOT_CANCELLABLE`.                                                                                               | unit, integration                  |
+| AC-JOB-08 | Progress is persisted, monotonic and reaches 100 only with `completed`.                                                                                                                   | unit, integration                  |
+| AC-JOB-09 | Terminal `completed`, `failed` or `cancelled` never returns to running.                                                                                                                   | unit                               |
+| AC-JOB-10 | Provider wait persists operation ID and resumes polling without blind resubmission.                                                                                                       | provider sandbox, restart/recovery |
+| AC-JOB-11 | Per-scene narration failure/retry does not redo completed scene artifacts.                                                                                                                | provider sandbox, restart/recovery |
+| AC-JOB-12 | Logs/file existence cannot change canonical Job state during restart/reconciliation.                                                                                                      | integration                        |
+| AC-JOB-13 | Lease expiry in `waiting_provider` preserves operation ID/state; a new polling lease resumes polling without provider resubmission.                                                       | provider sandbox, restart/recovery |
+| AC-JOB-14 | Lease expiry in `cancel_requested` preserves that state while another worker acquires cleanup lease and records `cancelled` or typed `failed`.                                            | restart/recovery                   |
+| AC-JOB-15 | JobStep states are exactly pending, running, waiting_provider, retry_scheduled, completed, skipped, cancelled and failed; terminal steps never reopen.                                    | unit, contract                     |
+| AC-JOB-16 | Retryable JobStep follows running or waiting_provider → retry_scheduled → pending → running; failed is terminal.                                                                          | unit, integration                  |
+| AC-JOB-17 | Narration has one parent step and unique child items keyed by sceneId; the parent completes only after all required items complete or validly skip.                                       | integration, provider sandbox      |
+| AC-JOB-18 | GenerationJob has zero or many same-Project child RenderJobs via parentJobId; standalone rerender has no parent and reuse requires the full identity/version/provider contract.           | contract, authorization            |
+| AC-JOB-19 | Provider submission intent commits request hash/idempotency key/attempt/outbox before the call; unknown outcome is reconciled before resubmit and only acceptance stores an operation ID. | provider sandbox, restart/recovery |
 
 ## Composition and preview
 
-| ID         | Given / when / then                                                                                              | Planned test               |
-| ---------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| AC-COMP-01 | CompositionVersion is immutable after creation.                                                                  | unit, integration          |
-| AC-COMP-02 | Every accepted edit creates a new monotonically numbered version and updates Project pointer transactionally.    | integration                |
-| AC-COMP-03 | Invalid schema/unknown style/direct HTML-CSS-JS input is rejected.                                               | contract, security         |
-| AC-COMP-04 | Asset reference outside the Project or not `ready + active` is rejected.                                         | authorization              |
-| AC-COMP-05 | Preview and render receive the same exact CompositionVersion ID.                                                 | contract, E2E              |
-| AC-COMP-06 | Preview and render deterministically produce the same render contract fingerprint from canonical lineage fields. | contract                   |
-| AC-COMP-07 | Voice, caption and BGM edits are structured/versioned rather than DOM mutation.                                  | contract                   |
-| AC-COMP-08 | Missing or incompatible dependency/font/runtime fails preflight before Modal submission.                         | contract, provider sandbox |
-| AC-COMP-09 | Preview is read-only and cannot mutate canonical composition.                                                    | E2E, security              |
+| ID         | Given / when / then                                                                                                                              | Planned test               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
+| AC-COMP-01 | CompositionVersion is immutable after creation.                                                                                                  | unit, integration          |
+| AC-COMP-02 | Every accepted edit creates a new monotonically numbered version and updates Project pointer transactionally.                                    | integration                |
+| AC-COMP-03 | Invalid schema/unknown style/direct HTML-CSS-JS input is rejected.                                                                               | contract, security         |
+| AC-COMP-04 | Asset reference outside the Project or not `ready + active` is rejected.                                                                         | authorization              |
+| AC-COMP-05 | Preview and render receive the same exact CompositionVersion ID.                                                                                 | contract, E2E              |
+| AC-COMP-06 | Preview and render deterministically produce the same render contract fingerprint from canonical lineage fields.                                 | contract                   |
+| AC-COMP-07 | Voice, caption and BGM edits are structured/versioned rather than DOM mutation.                                                                  | contract                   |
+| AC-COMP-08 | Missing or incompatible dependency/font/runtime fails preflight before Modal submission.                                                         | contract, provider sandbox |
+| AC-COMP-09 | Preview is read-only and cannot mutate canonical composition.                                                                                    | E2E, security              |
+| AC-COMP-10 | Materializer, HyperFrames, CSP, manifest or fingerprint upgrades create a distinct immutable preview artifact and preserve historical artifacts. | integration, contract      |
 
 ## Render and quality
 
@@ -175,27 +183,29 @@ Phase 2 maps these criteria to concrete test layers and fixtures in `docs/archit
 
 ## Errors and diagnostics
 
-| ID        | Given / when / then                                                                       | Planned test           |
-| --------- | ----------------------------------------------------------------------------------------- | ---------------------- |
-| AC-ERR-01 | Every expected failure uses one stable catalog code and retryable flag.                   | contract               |
-| AC-ERR-02 | User message is safe Vietnamese and includes an actionable next step.                     | contract, localization |
-| AC-ERR-03 | Response exposes no secret, storage/filesystem path, raw provider payload or stack trace. | security               |
-| AC-ERR-04 | Failed Job exposes authorized step, attempt, eligibility and correlation ID.              | integration            |
-| AC-ERR-05 | Provider errors map to provider-neutral codes and bounded retry policy.                   | provider sandbox       |
-| AC-ERR-06 | Internal error is logged with protected details while response stays generic.             | integration, security  |
+| ID        | Given / when / then                                                                                                                                          | Planned test           |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
+| AC-ERR-01 | Every expected failure uses one stable catalog code and retryable flag.                                                                                      | contract               |
+| AC-ERR-02 | User message is safe Vietnamese and includes an actionable next step.                                                                                        | contract, localization |
+| AC-ERR-03 | Response exposes no secret, storage/filesystem path, raw provider payload or stack trace.                                                                    | security               |
+| AC-ERR-04 | Failed Job exposes authorized step, attempt, eligibility and correlation ID.                                                                                 | integration            |
+| AC-ERR-05 | Provider errors map to provider-neutral codes and bounded retry policy.                                                                                      | provider sandbox       |
+| AC-ERR-06 | Internal error is logged with protected details while response stays generic.                                                                                | integration, security  |
+| AC-ERR-07 | Every public code used by API/upload/delivery/job/criteria exists in `ERROR_MODEL.md`; private missing/unauthorized resources use only `RESOURCE_NOT_FOUND`. | contract               |
 
 ## Admin
 
-| ID          | Given / when / then                                                                           | Planned test          |
-| ----------- | --------------------------------------------------------------------------------------------- | --------------------- |
-| AC-ADMIN-01 | Admin lists pending users and approves one to `active`.                                       | E2E                   |
-| AC-ADMIN-02 | Admin disables an active user and existing sessions immediately lose product access.          | integration, E2E      |
-| AC-ADMIN-03 | Admin rejects pending user without hard deletion.                                             | integration           |
-| AC-ADMIN-04 | Non-admin receives authorization denial for every admin capability.                           | authorization         |
-| AC-ADMIN-05 | Failed-job view contains safe state/step/error/timestamps but no private bytes/secrets/paths. | security, E2E         |
-| AC-ADMIN-06 | Provider health is distinguishable from configured credentials and successful real use.       | contract              |
-| AC-ADMIN-07 | Credential update accepts a reference/write-only value and never returns raw secret.          | security, integration |
-| AC-ADMIN-08 | User, credential and quota mutations create actor/target AuditEvents.                         | integration           |
+| ID          | Given / when / then                                                                                            | Planned test          |
+| ----------- | -------------------------------------------------------------------------------------------------------------- | --------------------- |
+| AC-ADMIN-01 | Admin lists pending users and approves one to `active`.                                                        | E2E                   |
+| AC-ADMIN-02 | Admin disables an active user and existing sessions immediately lose product access.                           | integration, E2E      |
+| AC-ADMIN-03 | Admin rejects pending user without hard deletion.                                                              | integration           |
+| AC-ADMIN-04 | Non-admin receives authorization denial for every admin capability.                                            | authorization         |
+| AC-ADMIN-05 | Failed-job view contains safe state/step/error/timestamps but no private bytes/secrets/paths.                  | security, E2E         |
+| AC-ADMIN-06 | Provider health is distinguishable from configured credentials and successful real use.                        | contract              |
+| AC-ADMIN-07 | Credential update accepts a reference/write-only value and never returns raw secret.                           | security, integration |
+| AC-ADMIN-08 | User, credential and quota mutations create actor/target AuditEvents.                                          | integration           |
+| AC-ADMIN-09 | Admin job projections exclude prompts, private bytes, storage paths/keys, raw provider payloads and owner SSE. | security, E2E         |
 
 ## Security and observability
 
@@ -233,12 +243,13 @@ Phase 2 maps these criteria to concrete test layers and fixtures in `docs/archit
 
 ## Deployment
 
-| ID           | Given / when / then                                                                          | Planned test                  |
-| ------------ | -------------------------------------------------------------------------------------------- | ----------------------------- |
-| AC-DEPLOY-01 | Runtime metadata exposes the validated Git source SHA.                                       | integration, deployment smoke |
-| AC-DEPLOY-02 | Validation failure prevents the HF sync job.                                                 | CI                            |
-| AC-DEPLOY-03 | HF sync deploys the exact validated commit only after validation.                            | CI, deployment smoke          |
-| AC-DEPLOY-04 | Cloudflare, D1, R2 and dual topology are absent from MVP architecture/runtime configuration. | architecture, contract        |
-| AC-DEPLOY-05 | Database and object storage readiness are checked independently from liveness.               | integration                   |
-| AC-DEPLOY-06 | Rebuild/restart preserves canonical data and resumes eligible durable Jobs.                  | restart/recovery              |
-| AC-DEPLOY-07 | Modal protocol is versioned and incompatible runtime versions are rejected before rendering. | contract, provider sandbox    |
+| ID           | Given / when / then                                                                                                                                                             | Planned test                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| AC-DEPLOY-01 | Runtime metadata exposes the validated Git source SHA.                                                                                                                          | integration, deployment smoke |
+| AC-DEPLOY-02 | Validation failure prevents the HF sync job.                                                                                                                                    | CI                            |
+| AC-DEPLOY-03 | HF sync deploys the exact validated commit only after validation.                                                                                                               | CI, deployment smoke          |
+| AC-DEPLOY-04 | Cloudflare, D1, R2 and dual topology are absent from MVP architecture/runtime configuration.                                                                                    | architecture, contract        |
+| AC-DEPLOY-05 | Database and object storage readiness are checked independently from liveness.                                                                                                  | integration                   |
+| AC-DEPLOY-06 | Rebuild/restart preserves canonical data and resumes eligible durable Jobs.                                                                                                     | restart/recovery              |
+| AC-DEPLOY-07 | Modal protocol is versioned and incompatible runtime versions are rejected before rendering.                                                                                    | contract, provider sandbox    |
+| AC-DEPLOY-08 | Migration v4/v6 never references composition tables before v7; every version passes `foreign_key_check`, and backup verification runs on the exact reviewed Node 22.16.0 patch. | migration, CI                 |

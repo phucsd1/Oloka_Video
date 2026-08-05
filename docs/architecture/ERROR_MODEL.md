@@ -1,48 +1,78 @@
 # Typed Error Model
 
-## Envelope and safety
+This document is the sole source of truth for stable public error codes. Other
+documents may name an internal cause, but an API response, durable owner-facing
+job event, upload/delivery failure, acceptance criterion, or UI contract may use
+only a code in this catalog.
 
-Every expected failure returns or records a stable `code`, `retryable`, localized safe message key/text, suggested action, correlation ID, and optional safe field details. Internal logs add stack/cause only in protected telemetry. Responses and durable safe details never expose secrets, raw provider payloads, tokens, filesystem paths, storage keys, or stack traces.
+## Envelope and disclosure
 
-HTTP status applies to synchronous commands/queries. Asynchronous jobs store the same code and expose it through authorized status APIs.
+Every expected failure returns or records `code`, `retryable`, a localized
+`messageKey`, a `suggestedAction`, `requestId`, and optional allowlisted field
+details. Protected telemetry may add a redacted internal cause and stack.
+Responses and durable safe details never expose secrets, raw provider payloads,
+tokens, prompts, filesystem paths, storage keys, or stack traces.
 
-## Error catalog
+Authentication is evaluated before private-resource lookup where needed to
+avoid disclosure. After authentication, a missing resource and a resource owned
+by somebody else both return `RESOURCE_NOT_FOUND`. Names such as
+project-not-found or asset-not-found may exist only as protected internal cause
+categories; they are not public codes.
 
-| Code                        | HTTP | Retryable                        | Safe message / suggested action                            | Log / admin                                |
-| --------------------------- | ---: | -------------------------------- | ---------------------------------------------------------- | ------------------------------------------ |
-| `VALIDATION_ERROR`          |  400 | No until input changes           | Dữ liệu không hợp lệ; sửa field được chỉ ra                | Info; no admin                             |
-| `AUTHENTICATION_REQUIRED`   |  401 | Yes after login                  | Cần đăng nhập; đăng nhập lại bằng Google                   | Info; no admin                             |
-| `AUTHORIZATION_DENIED`      |  403 | No                               | Không có quyền; quay lại tài nguyên của bạn                | Warn; investigate repeated probes          |
-| `ACCOUNT_PENDING`           |  403 | Yes after approval               | Tài khoản đang chờ duyệt; chờ hoặc liên hệ admin           | Info; admin may review                     |
-| `ACCOUNT_DISABLED`          |  403 | No                               | Tài khoản đã bị khóa; liên hệ admin                        | Warn; admin required                       |
-| `ACCOUNT_REJECTED`          |  403 | No unless admin changes status   | Tài khoản không được phê duyệt; liên hệ admin nếu cần      | Info/Warn; admin status change required    |
-| `QUOTA_EXCEEDED`            |  429 | Yes after capacity/action        | Đã vượt giới hạn; giảm dung lượng hoặc chờ job khác        | Info/metric; admin only for policy issue   |
-| `PROJECT_NOT_FOUND`         |  404 | No                               | Không tìm thấy project; tải lại danh sách                  | Info; no admin                             |
-| `PROJECT_DELETED`           |  409 | Yes after restore                | Project đang ở thùng rác; khôi phục trong thời hạn         | Info; no admin                             |
-| `ASSET_NOT_FOUND`           |  404 | No                               | Không tìm thấy asset; chọn asset khác                      | Info; no admin                             |
-| `ASSET_UNAVAILABLE`         |  409 | Yes                              | Asset chưa sẵn sàng; chờ xử lý hoặc thử lại                | Warn; admin if storage degraded            |
-| `ASSET_INVALID`             |  422 | No until replacement             | Asset không hợp lệ; tải file được hỗ trợ                   | Info/Warn; no admin normally               |
-| `STORAGE_UNAVAILABLE`       |  503 | Yes                              | Lưu trữ tạm thời không sẵn sàng; thử lại sau               | Error; admin intervention if sustained     |
-| `PROVIDER_UNAVAILABLE`      |  503 | Yes                              | Dịch vụ xử lý tạm thời không sẵn sàng                      | Error/metric; admin if sustained           |
-| `PROVIDER_RATE_LIMITED`     |  429 | Yes                              | Provider đang giới hạn; hệ thống sẽ thử lại                | Warn/metric; admin if quota/config         |
-| `PROVIDER_TIMEOUT`          |  504 | Yes if policy allows             | Provider quá thời gian; thử lại từ checkpoint              | Warn/Error; admin if repeated              |
-| `PROVIDER_REJECTED`         |  422 | Usually no                       | Provider từ chối yêu cầu; điều chỉnh nội dung/cấu hình     | Warn; admin for credential/policy cause    |
-| `INVALID_PROVIDER_RESPONSE` |  502 | Yes if bounded                   | Provider trả dữ liệu không hợp lệ; hệ thống có thể thử lại | Error; admin if repeated                   |
-| `COMPOSITION_INVALID`       |  422 | No until regenerated/edited      | Bố cục không hợp lệ; sửa hoặc tạo lại                      | Warn; no admin unless systemic             |
-| `DEPENDENCY_MISSING`        |  422 | Yes after dependency repair      | Thiếu dependency render; tạo lại bundle                    | Error; admin if registry issue             |
-| `RENDER_FAILED`             |  502 | Yes if eligible                  | Render thất bại; thử lại từ bước render                    | Error; admin if repeated/provider-wide     |
-| `QUALITY_GATE_FAILED`       |  422 | No until new output/settings     | Video không đạt kiểm tra kỹ thuật; xem lỗi và render lại   | Warn; no admin unless systemic             |
-| `CONFLICT`                  |  409 | Yes after refresh                | Dữ liệu đã thay đổi; tải lại rồi thử lại                   | Info; no admin                             |
-| `IDEMPOTENCY_CONFLICT`      |  409 | No with same key                 | Khóa yêu cầu đã dùng cho nội dung khác; gửi khóa mới       | Warn; investigate client bug               |
-| `JOB_NOT_CANCELLABLE`       |  409 | No                               | Job không thể hủy ở trạng thái hiện tại                    | Info; no admin                             |
-| `CANCELLED`                 |  409 | No                               | Job đã bị hủy; tạo yêu cầu mới nếu cần                     | Info; no admin                             |
-| `INTERNAL_ERROR`            |  500 | Maybe, never automatic unbounded | Có lỗi nội bộ; thử lại sau và cung cấp correlation ID      | Error/Critical; admin required if repeated |
+## Canonical catalog
+
+| Code                        | HTTP | Retryable                     | Public message key                | Suggested action                                 | Internal severity | Allowed surfaces           |
+| --------------------------- | ---: | ----------------------------- | --------------------------------- | ------------------------------------------------ | ----------------- | -------------------------- |
+| `VALIDATION_ERROR`          |  400 | No until input changes        | `error.validation`                | Correct the indicated fields                     | Info              | API, command               |
+| `INVALID_CURSOR`            |  400 | No with same cursor           | `error.cursor.invalid`            | Reload the first page                            | Info              | API                        |
+| `AUTHENTICATION_REQUIRED`   |  401 | Yes after login               | `error.auth.required`             | Sign in again with Google                        | Info              | API, UI                    |
+| `AUTHORIZATION_DENIED`      |  403 | No                            | `error.auth.denied`               | Return to an allowed surface                     | Warn              | API, admin command         |
+| `ACCOUNT_PENDING`           |  403 | Yes after approval            | `error.account.pending`           | Wait for approval or contact an admin            | Info              | API, UI                    |
+| `ACCOUNT_DISABLED`          |  403 | No                            | `error.account.disabled`          | Contact an admin                                 | Warn              | API, UI                    |
+| `ACCOUNT_REJECTED`          |  403 | No until admin change         | `error.account.rejected`          | Contact an admin if review is needed             | Info              | API, UI                    |
+| `RESOURCE_NOT_FOUND`        |  404 | No                            | `error.resource.not_found`        | Refresh the authorized list                      | Info              | API, delivery, upload      |
+| `RESOURCE_STATE_CONFLICT`   |  409 | After state changes           | `error.resource.state_conflict`   | Refresh status and retry if eligible             | Info              | API, job, upload           |
+| `VERSION_CONFLICT`          |  409 | Yes after refresh             | `error.version.conflict`          | Reload the latest version                        | Info              | API, job worker            |
+| `IDEMPOTENCY_CONFLICT`      |  409 | No with same key              | `error.idempotency.conflict`      | Use a new key for changed input                  | Warn              | API, job admission         |
+| `UPLOAD_NOT_OPEN`           |  409 | Only with an open session     | `error.upload.not_open`           | Resume or initialize a valid upload              | Info              | Upload API                 |
+| `UPLOAD_OFFSET_CONFLICT`    |  409 | Yes from acknowledged offset  | `error.upload.offset_conflict`    | Query and resume at the server offset            | Info              | Upload API                 |
+| `ASSET_UNAVAILABLE`         |  409 | Yes after processing/recovery | `error.asset.unavailable`         | Wait, retry ingestion, or select another asset   | Warn              | API, job, preview          |
+| `JOB_NOT_CANCELLABLE`       |  409 | No in current state           | `error.job.not_cancellable`       | Refresh job status                               | Info              | API, job command           |
+| `CANCELLED`                 |  409 | No                            | `error.job.cancelled`             | Create a new request if needed                   | Info              | Job result, API            |
+| `PAYLOAD_TOO_LARGE`         |  413 | No until reduced              | `error.payload.too_large`         | Reduce the request or file size                  | Info              | API, upload                |
+| `RANGE_NOT_SATISFIABLE`     |  416 | Yes with a valid range        | `error.range.unsatisfiable`       | Request a valid byte range                       | Info              | Delivery API               |
+| `UNSUPPORTED_MEDIA_TYPE`    |  415 | No until replaced             | `error.media.unsupported`         | Use a supported media type                       | Info              | API, upload                |
+| `ASSET_INVALID`             |  422 | No until replaced             | `error.asset.invalid`             | Replace or correct the asset                     | Warn              | API, job, upload           |
+| `UPLOAD_LENGTH_MISMATCH`    |  422 | No until bytes match          | `error.upload.length_mismatch`    | Restart with the correct declared length         | Warn              | Upload API                 |
+| `CHECKSUM_MISMATCH`         |  422 | No until bytes match          | `error.checksum.mismatch`         | Re-upload the verified bytes                     | Warn              | Upload, storage, delivery  |
+| `COMPOSITION_INVALID`       |  422 | No until edited/regenerated   | `error.composition.invalid`       | Fix or regenerate the composition                | Warn              | API, job, preview          |
+| `DEPENDENCY_MISSING`        |  422 | After dependency repair       | `error.dependency.missing`        | Rebuild or regenerate dependencies               | Error             | Job, preview, render       |
+| `PROVIDER_REJECTED`         |  422 | Usually no                    | `error.provider.rejected`         | Adjust content/configuration or contact an admin | Warn              | Job, admin health          |
+| `QUALITY_GATE_FAILED`       |  422 | No until new output/settings  | `error.quality.failed`            | Review findings and render again                 | Warn              | Job, output                |
+| `RATE_LIMITED`              |  429 | Yes after retry window        | `error.rate_limited`              | Wait for the indicated retry time                | Info              | API, auth, upload          |
+| `QUOTA_EXCEEDED`            |  429 | Yes after capacity/action     | `error.quota.exceeded`            | Reduce usage, wait, cancel, or unpin             | Info              | API, upload, job admission |
+| `PROVIDER_RATE_LIMITED`     |  429 | Yes after provider window     | `error.provider.rate_limited`     | Wait while the system applies bounded retry      | Warn              | Job, admin health          |
+| `INTERNAL_ERROR`            |  500 | Maybe; never unbounded        | `error.internal`                  | Retry later and provide the request ID           | Error             | API, job, admin            |
+| `INVALID_PROVIDER_RESPONSE` |  502 | Yes when bounded              | `error.provider.invalid_response` | Retry later; contact an admin if repeated        | Error             | Job, admin health          |
+| `RENDER_FAILED`             |  502 | Yes when eligible             | `error.render.failed`             | Retry from an eligible checkpoint                | Error             | Job, output                |
+| `STORAGE_UNAVAILABLE`       |  503 | Yes                           | `error.storage.unavailable`       | Retry later                                      | Error             | API, upload, delivery, job |
+| `PROVIDER_UNAVAILABLE`      |  503 | Yes                           | `error.provider.unavailable`      | Retry later                                      | Error             | API, job, admin health     |
+| `PROVIDER_TIMEOUT`          |  504 | Yes when policy permits       | `error.provider.timeout`          | Wait for reconciliation or retry when eligible   | Warn              | Job, admin health          |
 
 ## Mapping rules
 
-1. Authentication is evaluated before resource existence when disclosure would leak another user's resource.
-2. Provider-specific codes/messages are mapped to this catalog; raw provider text is log-only after redaction.
-3. Retryability is contextual and bounded by job attempt policy; `retryable=true` never means infinite retry.
-4. `QUALITY_GATE_FAILED` is distinct from `RENDER_FAILED`: rendered bytes may exist but cannot be published.
-5. Cancellation is not represented as generic failure; job state becomes `cancelled` and may expose `CANCELLED` as the operation result.
-6. A rejected User always maps to `ACCOUNT_REJECTED`, distinct from `ACCOUNT_DISABLED`; only an admin status change can make the same request eligible.
+1. `QUOTA_EXCEEDED`, `RATE_LIMITED`, and `PROVIDER_RATE_LIMITED` always map
+   to HTTP 429; they never map to 409.
+2. Stale optimistic versions use `VERSION_CONFLICT`; invalid lifecycle or
+   transition state uses `RESOURCE_STATE_CONFLICT`; reuse of a key for different
+   semantics uses `IDEMPOTENCY_CONFLICT`.
+3. Input shape uses `VALIDATION_ERROR`; typed domain validation uses
+   `ASSET_INVALID`, `COMPOSITION_INVALID`, or `QUALITY_GATE_FAILED`.
+4. Dependency failures map to `STORAGE_UNAVAILABLE`, `PROVIDER_UNAVAILABLE`,
+   or `DEPENDENCY_MISSING`; there is no generic dependency-unavailable code.
+5. Provider-specific codes/messages are mapped to this catalog. Raw provider
+   text remains protected telemetry after redaction.
+6. Retryability is contextual and bounded by attempt/deadline policy;
+   `retryable=true` never means infinite retry.
+7. Cancellation changes canonical job state to `cancelled`; `CANCELLED` may be
+   exposed only as the operation result, not as a manufactured failure.

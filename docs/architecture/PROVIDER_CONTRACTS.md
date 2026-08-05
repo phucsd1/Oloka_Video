@@ -6,6 +6,22 @@ Routes and frontend call application capabilities, never provider SDKs/endpoints
 
 Provider raw payloads, secrets, access tokens, internal prompts, URLs containing credentials, and stack traces never enter user responses or ordinary domain tables.
 
+## Submission-intent protocol
+
+Before any cost-bearing/asynchronous submit, the application transaction stores
+submission-requested state, canonical semantic request hash, stable provider
+idempotency-key hash, attempt, lease/version, and outbox intent. No placeholder
+operation ID is created. The adapter call occurs outside SQLite. Only a provider
+acceptance result supplies the operation ID that a second guarded transaction
+stores with `waiting_provider` state and an event/outbox record.
+
+If the call times out after transmission, the outcome is unknown. The adapter
+must reconcile by provider idempotency key or supported lookup and must not
+resubmit immediately. A new submit is allowed only when absence is proven and
+bounded policy permits it. Providers without lookup/idempotency support must be
+declared incompatible with automatic resubmission; operator review or terminal
+safe failure is preferred over duplicate cost.
+
 ## LLM adapter
 
 | Capability           | Request                                                                               | Result                                                                     |
@@ -51,3 +67,5 @@ The preview/preflight/materialization boundary accepts a frozen CompositionVersi
 - Rate limits honor provider retry hints within configured bounds.
 - Health does not prove quota or end-to-end success and never uses a paid generation/render request by default.
 - Circuit breaking may reject quickly with `PROVIDER_UNAVAILABLE`; it does not silently choose another provider in MVP.
+- Adapter failures map only to the canonical error catalog; raw provider names,
+  bodies, and codes are protected diagnostics.

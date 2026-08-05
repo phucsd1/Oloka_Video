@@ -12,7 +12,8 @@ Unknown and unauthorized private resources both return `404 RESOURCE_NOT_FOUND`.
 
 - Assets, preview artifacts, and render outputs support `GET` and `HEAD` through resource-specific `/api/v1` routes.
 - Single HTTP byte ranges are supported with `Accept-Ranges: bytes`, validated `Range`, `206`, `Content-Range`, and exact `Content-Length`.
-- Invalid/unsatisfiable ranges return `416` with `Content-Range: bytes */<size>`.
+- Invalid/unsatisfiable ranges return `416 RANGE_NOT_SATISFIABLE` with
+  `Content-Range: bytes */<size>`.
 - Responses use the stored verified content type, safe `Content-Disposition`, `ETag` derived from immutable byte checksum, `Last-Modified`, `nosniff`, and private cache policy.
 - Conditional `If-None-Match` may return `304`. Multi-range requests are rejected in MVP.
 - Stream abort closes the file handle and records safe metrics; it never changes resource state.
@@ -25,4 +26,8 @@ Issuance itself requires a current authorized session. The URL contains only the
 
 ## Failure handling
 
-Missing underlying bytes are not converted to an empty response: return safe `503 STORAGE_OBJECT_UNAVAILABLE`, mark a reconciliation incident, and alert. Checksum mismatch quarantines delivery. Backpressure is provided by Node streams; the server never buffers a full media object in memory.
+Missing underlying bytes are not converted to an empty response: return safe
+`503 STORAGE_UNAVAILABLE`, mark a reconciliation incident, and alert. Checksum
+mismatch returns `CHECKSUM_MISMATCH` on non-streaming verification paths and
+quarantines delivery before further access. Backpressure is provided by Node
+streams; the server never buffers a full media object in memory.

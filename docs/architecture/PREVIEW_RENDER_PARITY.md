@@ -27,6 +27,12 @@ Canonical render lineage consists of `bundleChecksum`, `compositionSchemaVersion
 
 Preview metadata, preflight, RenderJob, and RenderOutput record and compare the same fingerprint. Lineage scalars/hashes are stored directly in the immutable output snapshot; the bundle and larger immutable manifests are referenced by hash. A provider adapter rejects incompatible protocol versions or any lineage mismatch before submission.
 
+A preview artifact identity includes CompositionVersion, render-contract
+fingerprint, materializer version, HyperFrames version through the fingerprint,
+and CSP profile version. Upgrading materializer, HyperFrames, CSP, registry, or
+any manifest creates a new immutable artifact generation. Historical artifacts
+remain addressable under retention and are never overwritten.
+
 ## Drift prevention
 
 - A mismatch in schema, dependency, font, caption, renderer, HyperFrames, protocol, bundle, asset checksum, or render contract fingerprint fails with a typed error; no silent fallback.

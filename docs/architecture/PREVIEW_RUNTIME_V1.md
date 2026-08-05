@@ -31,7 +31,9 @@ Official source: <https://github.com/heygen-com/hyperframes>.
 - Artifact inputs are only validated structured composition, authorized immutable asset bytes, approved registries/fonts, and trusted runtime code.
 - The artifact fingerprint includes composition canonical hash, ordered asset byte checksums, registry/template/font versions, materializer/runtime version, and CSP profile version.
 - It is stored under an opaque key and registered in `preview_artifacts`; users see only preview IDs.
-- `GET /api/v1/previews/:id` authorizes owner/admin and returns a no-store bootstrap. Artifact bytes use authenticated delivery or a five-minute resource/operation-scoped opaque capability.
+- `GET /api/v1/previews/:id` is owner-only and returns a no-store bootstrap.
+  Admin has no owner-preview route. Artifact bytes use authenticated delivery or
+  a five-minute resource/operation-scoped opaque capability.
 - A project/user lifecycle change can revoke delivery without changing immutable artifact bytes.
 
 ## Browser isolation
@@ -53,3 +55,9 @@ Known unavoidable differences (browser color/codec playback versus server encode
 ## Failure and cleanup
 
 Materialization timeout, validation failure, missing asset, runtime version mismatch, or artifact checksum mismatch produces a stable failed job/event and no preview URL. Quarantined artifacts are not delivered. Bounded worker TTL/lease recovery and stale temp cleanup use durable jobs. No progress is inferred from an iframe timer.
+
+The artifact row records composition version, render-contract fingerprint,
+materializer version, HyperFrames version, CSP profile version, storage key,
+byte checksum, status, creation time, and purge deadline. A change to any
+materializer/HyperFrames/CSP/manifest/fingerprint input creates a new historical
+artifact; it never overwrites the prior bytes.

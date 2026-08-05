@@ -10,7 +10,7 @@ This document resolves the choices left open in `MVP_SYSTEM_BOUNDARY.md`; the Ph
 
 | Concern  | Locked choice                                                                   | Explicitly excluded from MVP                          |
 | -------- | ------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| Runtime  | Node.js 22, TypeScript ESM, npm workspaces                                      | second backend, serverless split                      |
+| Runtime  | Node.js 22.16.0 exact reviewed patch, TypeScript ESM, npm workspaces            | floating Node major, second backend, serverless split |
 | HTTP/UI  | Fastify 5, React, Vite, Zod contracts                                           | full-stack framework, duplicated API types            |
 | Database | `node:sqlite`, one database under `/data/database`                              | ORM, external database, replicas                      |
 | Bytes    | filesystem object adapter rooted at `/data/objects`                             | Git-tracked runtime bytes, S3/R2                      |
@@ -90,6 +90,18 @@ MVP intentionally supports one Space replica and one application process. WAL im
 ## Source evidence
 
 - Foundation runtime and workspace: `package.json`, `apps/server/package.json`, `apps/web/package.json`, `packages/contracts/package.json`.
-- Current process, configuration, database, and storage adapters: `apps/server/src/main.ts`, `apps/server/src/app.ts`, `apps/server/src/config/env.ts`, `apps/server/src/infrastructure/database.ts`, `apps/server/src/infrastructure/object-storage.ts`.
-- Deployment topology: `Dockerfile`, `.github/workflows/ci.yml`, `.github/workflows/deploy-hf.yml`, `docs/architecture/DEPLOYMENT.md`.
+- Current process and HTTP composition: `apps/server/src/index.ts`,
+  `apps/server/src/app.ts`, `apps/server/src/http/routes.integration.test.ts`.
+- Current configuration: `apps/server/src/config/environment.ts` and its unit
+  test.
+- Current database boundary/adapters:
+  `apps/server/src/database/database.ts`,
+  `apps/server/src/database/create-database.ts`, and
+  `apps/server/src/database/sqlite-system-database.ts`.
+- Current storage boundary/adapters: `apps/server/src/storage/object-storage.ts`
+  and `apps/server/src/storage/filesystem-object-storage.ts`.
+- Current system services: `apps/server/src/system/health-service.ts`,
+  `readiness-service.ts`, and `version-service.ts`.
+- Deployment topology: `Dockerfile`, `.github/workflows/validation.yml`,
+  `.github/workflows/deploy-hf.yml`, and `docs/architecture/DEPLOYMENT.md`.
 - Product/domain authority: `docs/product/**`, `docs/architecture/DOMAIN_MODEL.md`, `docs/architecture/JOB_STATE_MACHINE.md`, and ADRs 0001-0016.
