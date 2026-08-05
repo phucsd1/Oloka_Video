@@ -24,6 +24,11 @@ async function start(): Promise<void> {
       environment: environment.nodeEnv,
       version: environment.appVersion,
       gitCommitSha: environment.gitCommitSha,
+      persistence: {
+        adapter: "sqlite",
+        schemaVersion: 2,
+        migrationsVerified: true,
+      },
     },
     "Oloka Video is listening",
   );
@@ -31,7 +36,7 @@ async function start(): Promise<void> {
 
 start().catch((error: unknown) => {
   process.stderr.write(
-    `${JSON.stringify({ level: "fatal", message: "startup failed", error: error instanceof Error ? error.message : String(error) })}\n`,
+    `${JSON.stringify({ level: "fatal", message: "startup failed", errorCode: "STARTUP_FAILED", errorType: error instanceof Error ? error.name : "UnknownError" })}\n`,
   );
   process.exitCode = 1;
 });

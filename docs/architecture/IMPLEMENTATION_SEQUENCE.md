@@ -1,8 +1,11 @@
 # Phase 3 Implementation Sequence
 
-Status: proposed vertical slices. Only 3A may start after explicit product-owner review/approval of Phase 2. This document does not authorize any implementation.
+Status: Slice 3A implemented; later slices remain proposed and require explicit authorization.
 
 ## 3A — Persistence kernel
+
+Implementation status: complete in Phase 3A. See
+`PHASE3A_PERSISTENCE_KERNEL.md`. This status does not authorize Slice 3B.
 
 - Modules/files: migration asset loader/runner, `SystemDatabase` transaction
   runner, UUID/time/HKDF helpers, repository contracts, outbox

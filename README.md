@@ -10,7 +10,7 @@ pinned: false
 
 # Oloka Video
 
-Oloka Video is a greenfield TypeScript modular monolith. This foundation hosts a React frontend and a Fastify API in one Docker image on port `7860`, with explicit database, storage, contract, and design-system boundaries.
+Oloka Video is a greenfield TypeScript modular monolith. This foundation hosts a React frontend and a Fastify API in one Docker image on port `7860`, with explicit database, storage, contract, and design-system boundaries. Phase 3A adds the persistence kernel only; product features remain intentionally absent.
 
 ## Repository layout
 
@@ -23,7 +23,7 @@ Oloka Video is a greenfield TypeScript modular monolith. This foundation hosts a
 
 ## Run locally
 
-Requirements: Node.js 22+, npm 10+, and a writable data directory.
+Requirements: Node.js `22.16.0`, npm, and a writable data directory. Use `.nvmrc` or `.node-version`; the exact patch is required because the persistence backup contract depends on that runtime.
 
 ```bash
 npm ci
@@ -49,6 +49,11 @@ npm run build
 npm run test:e2e
 ```
 
+An existing database with a pending migration also requires
+`OLOKA_APP_KEY`: an operator-managed secret encoded as canonical unpadded
+base64url for exactly 32 random bytes. A fresh empty database does not require
+the key. Never commit, print, or pass it as a Docker build argument.
+
 ## Build and run Docker
 
 ```bash
@@ -58,7 +63,9 @@ docker build \
   --build-arg BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
   -t oloka-video:dev .
 
-docker run --rm -p 7860:7860 -v oloka-video-data:/data oloka-video:dev
+docker run --rm -p 7860:7860 \
+  -e OLOKA_APP_KEY="$OLOKA_APP_KEY" \
+  -v oloka-video-data:/data oloka-video:dev
 ```
 
 The named volume is mounted at `/data`; the development SQLite database is created at `/data/database/oloka-dev.db`. The process runs as UID `1000`.
@@ -71,7 +78,7 @@ curl http://localhost:7860/api/ready
 curl http://localhost:7860/api/version
 ```
 
-`health` only confirms that the application process responds. `ready` performs live database and filesystem read/write checks. `version` exposes immutable build identity.
+`health` only confirms that the application process responds. `ready` verifies the exact migration ledger/checksums, SQLite connection invariants and foreign keys, plus the filesystem read/write check. `version` exposes immutable build identity.
 
 ## Configure Hugging Face
 
@@ -94,4 +101,4 @@ git push origin develop
 
 Avoid force-resetting shared GitHub history. If the Space itself is unhealthy, pause it while investigating and restart after a validated rollback is available.
 
-See [foundation architecture](docs/architecture/FOUNDATION.md), [deployment](docs/architecture/DEPLOYMENT.md), and [local development](docs/architecture/LOCAL_DEVELOPMENT.md) for deeper operational details.
+See [Phase 3A persistence kernel](docs/architecture/PHASE3A_PERSISTENCE_KERNEL.md), [foundation architecture](docs/architecture/FOUNDATION.md), [deployment](docs/architecture/DEPLOYMENT.md), and [local development](docs/architecture/LOCAL_DEVELOPMENT.md) for deeper operational details.

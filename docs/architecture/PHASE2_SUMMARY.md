@@ -80,3 +80,13 @@ Slice 3A must pin the same exact Node 22.16.0 patch in Docker and Actions before
 relying on online backup, derive separate keys from `OLOKA_APP_KEY`, and verify
 canonical HMAC-authenticated backup manifests. Phase 2.1 changes documentation
 only and does not start Slice 3A.
+
+## Phase 3A implementation note
+
+Phase 3A subsequently implemented the approved persistence kernel: exact Node
+pinning, immutable v1/v2 SQL assets and checksummed ledger, authenticated online
+pre-migration backup/restore verification, SQLite connection/transaction
+invariants, canonical JSON/hash primitives, typed metadata, append-only audit,
+idempotency, outbox repositories, and a dormant bounded outbox consumer
+skeleton. The implemented schema contains only the six approved Slice 3A
+tables. No Phase 3B identity/session or later product behavior was started.

@@ -28,8 +28,13 @@ export async function buildApplication(
         ? false
         : { level: environment.logLevel },
   });
-  const database = await createDatabase(environment.databaseUrl);
-  database.migrate();
+  const database = await createDatabase(environment);
+  try {
+    await database.migrate();
+  } catch (error) {
+    await database.close();
+    throw error;
+  }
   const storage = new FilesystemObjectStorage(environment.dataDir);
   const initialStorageState = await storage.checkReadiness();
   if (initialStorageState.status !== "ready") {

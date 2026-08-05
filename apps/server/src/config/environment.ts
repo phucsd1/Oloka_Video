@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { decodeApplicationKey } from "../kernel/app-key.js";
 
 const environmentSchema = z.object({
   NODE_ENV: z
@@ -16,6 +17,7 @@ const environmentSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
+  OLOKA_APP_KEY: z.string().optional(),
 });
 
 export interface AppEnvironment {
@@ -27,6 +29,7 @@ export interface AppEnvironment {
   gitCommitSha: string;
   buildTimestamp: string;
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
+  appKey?: Uint8Array;
 }
 
 export function parseEnvironment(input: NodeJS.ProcessEnv): AppEnvironment {
@@ -50,5 +53,8 @@ export function parseEnvironment(input: NodeJS.ProcessEnv): AppEnvironment {
     gitCommitSha: parsed.GIT_COMMIT_SHA,
     buildTimestamp: parsed.BUILD_TIMESTAMP,
     logLevel: parsed.LOG_LEVEL,
+    ...(parsed.OLOKA_APP_KEY === undefined
+      ? {}
+      : { appKey: decodeApplicationKey(parsed.OLOKA_APP_KEY) }),
   };
 }

@@ -1,57 +1,180 @@
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { access, mkdir, readFile, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import type { DatabaseReadiness, SystemDatabase } from "./database.js";
+import type { Clock } from "../kernel/clock.js";
+import { SystemClock } from "../kernel/clock.js";
+import { sha256Hex } from "../kernel/canonical-json.js";
+import type { IdGenerator } from "../kernel/id-generator.js";
+import { UuidIdGenerator } from "../kernel/id-generator.js";
+import {
+  PersistenceBusyError,
+  type DatabaseReadiness,
+  type SystemDatabase,
+  type TransactionContext,
+  type TransactionMode,
+  type TransactionRunner,
+} from "./database.js";
+import { createPreMigrationBackup } from "./pre-migration-backup.js";
+
+interface MigrationAsset {
+  version: number;
+  name: string;
+  sql: string;
+  checksum: string;
+}
+
+export interface SqliteConnectionOptions {
+  appBuildSha?: string;
+  appKey?: Uint8Array;
+  backupRoot?: string;
+  clock?: Clock;
+  idGenerator?: IdGenerator;
+}
+
+class SqliteTransactionRunner implements TransactionRunner {
+  private activeMode: TransactionMode | undefined;
+
+  constructor(private readonly database: DatabaseSync) {}
+
+  run<T>(
+    mode: TransactionMode,
+    operation: (context: TransactionContext) => T,
+  ): T {
+    if (this.activeMode !== undefined) {
+      if (mode !== "read") {
+        throw new Error("Nested write transactions are not allowed");
+      }
+      return this.invoke(operation);
+    }
+
+    this.activeMode = mode;
+    const begin = mode === "immediate" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED";
+    try {
+      this.database.exec(begin);
+      const result = this.invoke(operation);
+      this.database.exec(mode === "read" ? "ROLLBACK" : "COMMIT");
+      return result;
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      if (isSqliteBusy(error)) throw new PersistenceBusyError({ cause: error });
+      throw error;
+    } finally {
+      this.activeMode = undefined;
+    }
+  }
+
+  private invoke<T>(operation: (context: TransactionContext) => T): T {
+    const result = operation({ database: this.database });
+    if (isThenable(result)) {
+      throw new TypeError("Transaction callbacks must be synchronous");
+    }
+    return result;
+  }
+}
 
 export class SqliteSystemDatabase implements SystemDatabase {
-  private constructor(private readonly database: DatabaseSync) {}
+  readonly transactions: TransactionRunner;
+  private readonly clock: Clock;
+  private readonly appBuildSha: string;
+  private readonly appKey: Uint8Array | undefined;
+  private readonly backupRoot: string;
+  private readonly idGenerator: IdGenerator;
+  private migrationFailure: string | undefined;
+  private expectedMigrationChecksums = new Map<number, string>();
 
-  static async connect(databaseUrl: string): Promise<SqliteSystemDatabase> {
+  private constructor(
+    private readonly database: DatabaseSync,
+    private readonly databasePath: string,
+    options: SqliteConnectionOptions,
+  ) {
+    this.clock = options.clock ?? new SystemClock();
+    this.appBuildSha = options.appBuildSha ?? "local";
+    this.appKey = options.appKey;
+    this.backupRoot =
+      options.backupRoot ?? join(dirname(databasePath), "..", "backups");
+    this.idGenerator = options.idGenerator ?? new UuidIdGenerator();
+    this.transactions = new SqliteTransactionRunner(database);
+  }
+
+  static async connect(
+    databaseUrl: string,
+    options: SqliteConnectionOptions = {},
+  ): Promise<SqliteSystemDatabase> {
     if (!databaseUrl.startsWith("file:")) {
       throw new Error("The SQLite adapter requires a file: DATABASE_URL");
     }
     const databasePath = fileURLToPath(databaseUrl);
     await mkdir(dirname(databasePath), { recursive: true });
-    return new SqliteSystemDatabase(new DatabaseSync(databasePath));
+    const instance = new SqliteSystemDatabase(
+      new DatabaseSync(databasePath),
+      databasePath,
+      options,
+    );
+    instance.applyConnectionPragmas();
+    return instance;
   }
 
-  migrate(): void {
-    this.database.exec(`
-      PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        applied_at TEXT NOT NULL
+  async migrate(): Promise<void> {
+    try {
+      const migrations = await loadMigrationAssets();
+      this.expectedMigrationChecksums = new Map(
+        migrations.map((migration) => [migration.version, migration.checksum]),
       );
-      CREATE TABLE IF NOT EXISTS system_metadata (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
-      VALUES (1, 'foundation_system_tables', datetime('now'));
-    `);
+      const tables = this.listApplicationTables();
+      const isFreshDatabase = tables.length === 0;
+      if (isFreshDatabase) this.applyFoundationMigration(migrations[0]);
+      this.assertKnownSchemaBeforeMigration();
+
+      const currentVersion = this.currentSchemaVersion();
+      if (currentVersion > migrations.length) {
+        throw new Error("Database schema is newer than this application build");
+      }
+      if (currentVersion === 1) {
+        await this.applyPersistenceKernelMigration(
+          migrations[1],
+          !isFreshDatabase,
+        );
+      }
+      this.verifyAppliedMigrations(migrations);
+      this.migrationFailure = undefined;
+    } catch (error) {
+      this.migrationFailure = "Database migration verification failed";
+      throw error;
+    }
+  }
+
+  listApplicationTables(): string[] {
+    return (
+      this.database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .all() as { name: string }[]
+    ).map(({ name }) => name);
   }
 
   checkReadiness(): Promise<DatabaseReadiness> {
     try {
-      const result = this.database.prepare("SELECT 1 AS healthy").get() as
-        | { healthy?: number }
-        | undefined;
-      return Promise.resolve(
-        result?.healthy === 1
-          ? { status: "ready" }
-          : {
-              status: "not_ready",
-              message: "Database health query returned an unexpected result",
-            },
-      );
-    } catch (error) {
+      if (this.migrationFailure !== undefined) {
+        return Promise.resolve({
+          status: "not_ready",
+          message: this.migrationFailure,
+        });
+      }
+      this.verifyConnectionPragmas();
+      this.verifyAppliedMigrationsAgainstExpected();
+      const foreignKeyFailures = this.database
+        .prepare("PRAGMA foreign_key_check")
+        .all();
+      if (foreignKeyFailures.length > 0) {
+        throw new Error("Foreign key verification failed");
+      }
+      return Promise.resolve({ status: "ready" });
+    } catch {
       return Promise.resolve({
         status: "not_ready",
-        message:
-          error instanceof Error ? error.message : "Unknown database error",
+        message: "Database integrity verification failed",
       });
     }
   }
@@ -60,4 +183,230 @@ export class SqliteSystemDatabase implements SystemDatabase {
     this.database.close();
     return Promise.resolve();
   }
+
+  private applyConnectionPragmas(): void {
+    this.database.exec(
+      "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
+    );
+    this.verifyConnectionPragmas();
+  }
+
+  private verifyConnectionPragmas(): void {
+    const scalar = (pragma: string): number | string | undefined => {
+      const row = this.database.prepare(pragma).get() as
+        | Record<string, number | string>
+        | undefined;
+      return row === undefined ? undefined : Object.values(row)[0];
+    };
+    if (
+      scalar("PRAGMA foreign_keys") !== 1 ||
+      String(scalar("PRAGMA journal_mode")).toLowerCase() !== "wal" ||
+      scalar("PRAGMA synchronous") !== 2 ||
+      scalar("PRAGMA busy_timeout") !== 5000
+    ) {
+      throw new Error("Required SQLite connection PRAGMAs are not active");
+    }
+  }
+
+  private applyFoundationMigration(
+    migration: MigrationAsset | undefined,
+  ): void {
+    if (migration?.version !== 1)
+      throw new Error("Foundation migration is missing");
+    this.transactions.run("immediate", ({ database }) =>
+      database.exec(migration.sql),
+    );
+  }
+
+  private assertKnownSchemaBeforeMigration(): void {
+    const tables = this.listApplicationTables();
+    if (!tables.includes("schema_migrations")) {
+      throw new Error("Unrecognized database without a migration ledger");
+    }
+    const version = this.currentSchemaVersion();
+    if (version === 1) {
+      const allowed = ["schema_migrations", "system_metadata"];
+      if (tables.some((table) => !allowed.includes(table))) {
+        throw new Error("Foundation v1 database contains unknown tables");
+      }
+      const row = this.database
+        .prepare("SELECT version, name FROM schema_migrations")
+        .all() as { version: number; name: string }[];
+      if (
+        row.length !== 1 ||
+        row[0]?.version !== 1 ||
+        row[0].name !== "foundation_system_tables"
+      ) {
+        throw new Error("Foundation v1 migration identity is invalid");
+      }
+      this.assertExactFoundationColumns();
+    }
+  }
+
+  private assertExactFoundationColumns(): void {
+    const columns = (table: string) =>
+      (
+        this.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+          name: string;
+          type: string;
+          notnull: number;
+          pk: number;
+        }>
+      ).map(({ name, type, notnull, pk }) => ({ name, type, notnull, pk }));
+    const expectedLedger = [
+      { name: "version", type: "INTEGER", notnull: 0, pk: 1 },
+      { name: "name", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "applied_at", type: "TEXT", notnull: 1, pk: 0 },
+    ];
+    const expectedMetadata = [
+      { name: "key", type: "TEXT", notnull: 0, pk: 1 },
+      { name: "value", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "updated_at", type: "TEXT", notnull: 1, pk: 0 },
+    ];
+    if (
+      JSON.stringify(columns("schema_migrations")) !==
+        JSON.stringify(expectedLedger) ||
+      JSON.stringify(columns("system_metadata")) !==
+        JSON.stringify(expectedMetadata)
+    ) {
+      throw new Error("Foundation v1 table shape is invalid");
+    }
+  }
+
+  private currentSchemaVersion(): number {
+    const row = this.database
+      .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+      .get() as { version: number | null };
+    return row.version ?? 0;
+  }
+
+  private async applyPersistenceKernelMigration(
+    migration: MigrationAsset | undefined,
+    backupRequired: boolean,
+  ): Promise<void> {
+    if (migration?.version !== 2)
+      throw new Error("Persistence migration is missing");
+    if (backupRequired && this.appKey === undefined) {
+      throw new Error(
+        "An application key is required for pre-migration backup",
+      );
+    }
+    if (backupRequired && this.appKey !== undefined) {
+      await createPreMigrationBackup({
+        database: this.database,
+        backupRoot: this.backupRoot,
+        applicationKey: this.appKey,
+        appBuildSha: this.appBuildSha,
+        clock: this.clock,
+        idGenerator: this.idGenerator,
+        sourceSchemaVersion: 1,
+        targetSchemaVersion: 2,
+        migrationVersionsPending: [2],
+      });
+    }
+    const metadataCount = this.database
+      .prepare("SELECT COUNT(*) AS count FROM system_metadata")
+      .get() as { count: number };
+    if (metadataCount.count !== 0) {
+      throw new Error("Legacy system metadata cannot be safely normalized");
+    }
+    const startedAt = this.clock.now();
+    this.transactions.run("immediate", ({ database }) => {
+      database.exec(migration.sql);
+      database
+        .prepare(
+          `INSERT INTO schema_migrations
+            (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          migration.version,
+          migration.name,
+          migration.checksum,
+          this.clock.now(),
+          Math.max(0, this.clock.now() - startedAt),
+          this.appBuildSha,
+        );
+    });
+  }
+
+  private verifyAppliedMigrations(migrations: MigrationAsset[]): void {
+    const rows = this.database
+      .prepare(
+        "SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version",
+      )
+      .all() as { version: number; name: string; checksum_sha256: string }[];
+    if (rows.length !== migrations.length) {
+      throw new Error("Migration ledger has a version gap");
+    }
+    for (const [index, migration] of migrations.entries()) {
+      const row = rows[index];
+      if (
+        row?.version !== migration.version ||
+        row.name !== migration.name ||
+        row.checksum_sha256 !== migration.checksum
+      ) {
+        throw new Error("Applied migration checksum or identity mismatch");
+      }
+    }
+  }
+
+  private verifyAppliedMigrationsAgainstExpected(): void {
+    const rows = this.database
+      .prepare(
+        "SELECT version, checksum_sha256 FROM schema_migrations ORDER BY version",
+      )
+      .all() as { version: number; checksum_sha256: string }[];
+    if (rows.length !== this.expectedMigrationChecksums.size) {
+      throw new Error("Migration count mismatch");
+    }
+    for (const row of rows) {
+      if (
+        this.expectedMigrationChecksums.get(row.version) !== row.checksum_sha256
+      ) {
+        throw new Error("Migration checksum mismatch");
+      }
+    }
+  }
+}
+
+async function loadMigrationAssets(): Promise<MigrationAsset[]> {
+  const definitions = [
+    [1, "foundation_system_tables", "0001-foundation-system-tables.sql"],
+    [2, "persistence-kernel", "0002-persistence-kernel.sql"],
+  ] as const;
+  return Promise.all(
+    definitions.map(async ([version, name, filename]) => {
+      const url = new URL(`../../migrations/${filename}`, import.meta.url);
+      await access(url);
+      const bytes = await readFile(url);
+      const details = await stat(url);
+      if (!details.isFile() || bytes.length === 0) {
+        throw new Error(`Migration asset ${version} is invalid`);
+      }
+      return {
+        version,
+        name,
+        sql: bytes.toString("utf8"),
+        checksum: sha256Hex(bytes),
+      };
+    }),
+  );
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    ((typeof value === "object" && value !== null) ||
+      typeof value === "function") &&
+    "then" in value
+  );
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as Error & { code?: string }).code === "ERR_SQLITE_ERROR" &&
+    /busy|locked/i.test(error.message)
+  );
 }

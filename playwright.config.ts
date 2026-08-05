@@ -28,6 +28,7 @@ export default defineConfig({
       GIT_COMMIT_SHA: "playwright",
       BUILD_TIMESTAMP: "playwright",
       LOG_LEVEL: "silent",
+      OLOKA_APP_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     },
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],

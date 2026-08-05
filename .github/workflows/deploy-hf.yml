@@ -35,6 +35,9 @@ jobs:
 
           api = HfApi(token=os.environ["HF_TOKEN"])
           repo_id = "phucsd/Oloka-Video-Dev"
+          secret_names = {secret.key for secret in api.get_space_secrets(repo_id)}
+          if "OLOKA_APP_KEY" not in secret_names:
+              raise RuntimeError("Required Space secret OLOKA_APP_KEY is not configured")
           variables = {
               "NODE_ENV": "development",
               "GIT_COMMIT_SHA": os.environ["GITHUB_SHA"],

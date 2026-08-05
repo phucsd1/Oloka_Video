@@ -9,4 +9,10 @@ coverage/
 playwright-report/
 test-results/
 *.log
+*.db
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+backups/
 .DS_Store
