@@ -1,0 +1,105 @@
+name: HF S3 Litestream qualification
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - .github/workflows/hf-s3-litestream-qualification.yml
+      - scripts/hf-s3-qualification-database.mjs
+      - scripts/hf-s3-litestream-process-control.sh
+      - scripts/hf-s3-litestream-process-control.test.sh
+      - scripts/run-hf-s3-litestream-qualification.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hf-s3-litestream-qualification-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_ENDPOINT: https://s3.hf.co/phucsd
+      HF_S3_REGION: us-east-1
+      HF_S3_BUCKET: oloka-video-dev-data
+      QUALIFICATION_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+      QUALIFICATION_REPORT_PATH: ${{ github.workspace }}/hf-s3-litestream-qualification.json
+      LITESTREAM_VERSION: 0.5.11
+      LITESTREAM_SHA256: 2f80fdb6b0a0ff7a116ee37adf02d3de8e977ef76e052b28a6690218f0f7ab55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Test proc-safe cross-UID Litestream process control
+        env:
+          HF_S3_ACCESS_KEY_ID: ""
+          HF_S3_SECRET_ACCESS_KEY: ""
+        run: |
+          timeout --signal=TERM --kill-after=2s 20s \
+            bash scripts/hf-s3-litestream-process-control.test.sh
+      - name: Verify secret presence
+        run: |
+          test -n "$HF_S3_ACCESS_KEY_ID"
+          test -n "$HF_S3_SECRET_ACCESS_KEY"
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Build persistence kernel
+        run: |
+          npm run build -w @oloka/contracts
+          npm run build -w @oloka/server
+      - name: Install verified Litestream binary
+        run: |
+          archive="litestream-${LITESTREAM_VERSION}-linux-x86_64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/$archive"
+          echo "$LITESTREAM_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/litestream"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/litestream" litestream LICENSE
+          test "$(head -n 3 "$RUNNER_TEMP/litestream/LICENSE" | grep -c 'Apache License')" -eq 1
+          echo "LITESTREAM_BIN=$RUNNER_TEMP/litestream/litestream" >>"$GITHUB_ENV"
+      - name: Verify toolchain
+        run: |
+          test "$(node --version)" = "v22.16.0"
+          "$LITESTREAM_BIN" version
+          aws --version
+      - name: Qualify Litestream against isolated HF S3 prefix
+        run: |
+          timeout --signal=TERM --kill-after=30s 12m \
+            bash scripts/run-hf-s3-litestream-qualification.sh
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hf-s3-litestream-qualification-${{ github.run_id }}
+          path: hf-s3-litestream-qualification.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove isolated qualification objects
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          prefix="qualification/sqlite-litestream/$QUALIFICATION_RUN_ID"
+          test "${prefix#qualification/sqlite-litestream/}" != "$prefix"
+          aws --endpoint-url "$HF_S3_ENDPOINT" --region "$HF_S3_REGION" \
+            s3 rm "s3://$HF_S3_BUCKET/$prefix/" --recursive --only-show-errors
+          remaining_objects="$(aws --endpoint-url "$HF_S3_ENDPOINT" --region "$HF_S3_REGION" \
+            s3api list-objects-v2 \
+            --bucket "$HF_S3_BUCKET" \
+            --prefix "$prefix/" \
+            --query 'length(Contents || `[]`)' \
+            --output text)"
+          test "$remaining_objects" = "0"
