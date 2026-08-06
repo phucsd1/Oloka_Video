@@ -70,7 +70,7 @@ jobs:
         with:
           name: hf-s3-litestream-qualification-${{ github.run_id }}
           path: hf-s3-litestream-qualification.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
       - name: Remove isolated qualification objects
         if: always()
@@ -85,3 +85,10 @@ jobs:
           test "${prefix#qualification/sqlite-litestream/}" != "$prefix"
           aws --endpoint-url "$HF_S3_ENDPOINT" --region "$HF_S3_REGION" \
             s3 rm "s3://$HF_S3_BUCKET/$prefix/" --recursive --only-show-errors
+          remaining_objects="$(aws --endpoint-url "$HF_S3_ENDPOINT" --region "$HF_S3_REGION" \
+            s3api list-objects-v2 \
+            --bucket "$HF_S3_BUCKET" \
+            --prefix "$prefix/" \
+            --query 'length(Contents || `[]`)' \
+            --output text)"
+          test "$remaining_objects" = "0"
