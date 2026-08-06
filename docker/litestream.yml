@@ -1,0 +1,14 @@
+logging:
+  level: info
+
+dbs:
+  - path: ${DATABASE_PATH}
+    replica:
+      type: s3
+      bucket: ${HF_S3_BUCKET}
+      path: ${HF_S3_SQLITE_PREFIX}
+      endpoint: ${HF_S3_ENDPOINT}
+      region: ${HF_S3_REGION}
+      force-path-style: true
+      sign-payload: true
+      require-content-md5: false

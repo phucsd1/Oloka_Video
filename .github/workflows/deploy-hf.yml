@@ -36,10 +36,30 @@ jobs:
           api = HfApi(token=os.environ["HF_TOKEN"])
           repo_id = "phucsd/Oloka-Video-Dev"
           secret_names = set(api.get_space_secrets(repo_id))
-          if "OLOKA_APP_KEY" not in secret_names:
-              raise RuntimeError("Required Space secret OLOKA_APP_KEY is not configured")
+          required_secret_names = {
+              "OLOKA_APP_KEY",
+              "HF_S3_ACCESS_KEY_ID",
+              "HF_S3_SECRET_ACCESS_KEY",
+          }
+          missing_secret_names = required_secret_names - secret_names
+          if missing_secret_names:
+              raise RuntimeError(
+                  "Required Space secret names are not configured: "
+                  + ", ".join(sorted(missing_secret_names))
+              )
+          space_variable_names = set(api.get_space_variables(repo_id))
+          if "OLOKA_DATABASE_BOOTSTRAP_MODE" not in space_variable_names:
+              raise RuntimeError(
+                  "Required Space variable OLOKA_DATABASE_BOOTSTRAP_MODE is not configured"
+              )
           variables = {
-              "NODE_ENV": "development",
+              "NODE_ENV": "production",
+              "DATABASE_PATH": "/var/lib/oloka/database/oloka.db",
+              "OBJECT_STORAGE_ROOT": "/data",
+              "HF_S3_ENDPOINT": "https://s3.hf.co/phucsd",
+              "HF_S3_REGION": "us-east-1",
+              "HF_S3_BUCKET": "oloka-video-dev-data",
+              "HF_S3_SQLITE_PREFIX": "sqlite-replica/dev",
               "GIT_COMMIT_SHA": os.environ["GITHUB_SHA"],
               "BUILD_TIMESTAMP": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
           }
