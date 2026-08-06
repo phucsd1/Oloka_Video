@@ -192,6 +192,7 @@ cross_daemon_pid="$PIDFILE_HANDSHAKE_PID"
 [[ "$PIDFILE_HANDSHAKE_UID_VALID" == "true" ]]
 [[ "$PIDFILE_HANDSHAKE_START_IDENTITY_VALID" == "true" ]]
 [[ "$PIDFILE_HANDSHAKE_FILE_OWNER_UID" == "$(id -u nobody)" ]]
+[[ "$PIDFILE_HANDSHAKE_FILE_MODE" == "644" ]]
 (( (8#$PIDFILE_HANDSHAKE_FILE_MODE & 022) == 0 ))
 terminate_process_bounded "$cross_daemon_pid" 2 1
 if [[ "$cross_wrapper_pid" != "$cross_daemon_pid" ]]; then

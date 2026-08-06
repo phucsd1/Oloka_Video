@@ -63,6 +63,7 @@ write_pidfile_handshake() {
   start_identity="$(process_start_identity "$$")"
   temporary_file="${pid_file}.tmp.$$"
   printf '%s\t%s\t%s\n' "$$" "$start_identity" "$nonce" >"$temporary_file"
+  chmod 0644 "$temporary_file"
   mv -f -- "$temporary_file" "$pid_file"
 }
 
