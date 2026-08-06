@@ -94,18 +94,14 @@ describe("database migrations", () => {
     await database.close();
   });
 
-  it("treats a pre-created zero-byte database as fresh and requires no key", async () => {
+  it("rejects a pre-created zero-byte database instead of treating it as fresh", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const databasePath = join(directory, "database.sqlite");
     await writeFile(databasePath, new Uint8Array());
-    const database = await SqliteSystemDatabase.connect(
-      pathToFileURL(databasePath).href,
-    );
-
-    await expect(database.migrate()).resolves.toBeUndefined();
-    expect(database.listApplicationTables()).toContain("users");
-    await database.close();
+    await expect(
+      SqliteSystemDatabase.connect(pathToFileURL(databasePath).href),
+    ).rejects.toThrow(/zero bytes/i);
   });
 
   it("creates and verifies an authenticated online backup before upgrading v1", async () => {

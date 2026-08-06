@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "../kernel/clock.js";
 import { SystemClock } from "../kernel/clock.js";
@@ -16,6 +17,7 @@ import {
   type TransactionRunner,
 } from "./database.js";
 import { createPreMigrationBackup } from "./pre-migration-backup.js";
+import type { OperationalMetrics } from "../observability/operational-metrics.js";
 
 interface MigrationAsset {
   version: number;
@@ -30,17 +32,22 @@ export interface SqliteConnectionOptions {
   backupRoot?: string;
   clock?: Clock;
   idGenerator?: IdGenerator;
+  metrics?: OperationalMetrics;
 }
 
 class SqliteTransactionRunner implements TransactionRunner {
   private activeMode: TransactionMode | undefined;
 
-  constructor(private readonly database: DatabaseSync) {}
+  constructor(
+    private readonly database: DatabaseSync,
+    private readonly metrics?: OperationalMetrics,
+  ) {}
 
   run<T>(
     mode: TransactionMode,
     operation: (context: TransactionContext) => T,
   ): T {
+    const startedAt = performance.now();
     if (this.activeMode !== undefined) {
       if (mode !== "read") {
         throw new Error("Nested write transactions are not allowed");
@@ -57,10 +64,16 @@ class SqliteTransactionRunner implements TransactionRunner {
       return result;
     } catch (error) {
       if (this.database.isTransaction) this.database.exec("ROLLBACK");
-      if (isSqliteBusy(error)) throw new PersistenceBusyError({ cause: error });
+      if (isSqliteBusy(error)) {
+        this.metrics?.recordSqliteBusy();
+        throw new PersistenceBusyError({ cause: error });
+      }
       throw error;
     } finally {
       this.activeMode = undefined;
+      const durationMs = performance.now() - startedAt;
+      this.metrics?.observe("transaction", durationMs);
+      this.metrics?.observe("databaseOperation", durationMs);
     }
   }
 
@@ -80,6 +93,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
   private readonly appKey: Uint8Array | undefined;
   private readonly backupRoot: string;
   private readonly idGenerator: IdGenerator;
+  private readonly metrics: OperationalMetrics | undefined;
   private migrationFailure: string | undefined;
   private expectedMigrationChecksums = new Map<number, string>();
 
@@ -94,7 +108,8 @@ export class SqliteSystemDatabase implements SystemDatabase {
     this.backupRoot =
       options.backupRoot ?? join(dirname(databasePath), "..", "backups");
     this.idGenerator = options.idGenerator ?? new UuidIdGenerator();
-    this.transactions = new SqliteTransactionRunner(database);
+    this.metrics = options.metrics;
+    this.transactions = new SqliteTransactionRunner(database, options.metrics);
   }
 
   static async connect(
@@ -102,9 +117,16 @@ export class SqliteSystemDatabase implements SystemDatabase {
     options: SqliteConnectionOptions = {},
   ): Promise<SqliteSystemDatabase> {
     if (!databaseUrl.startsWith("file:")) {
-      throw new Error("The SQLite adapter requires a file: DATABASE_URL");
+      throw new Error("The SQLite adapter requires a file URL");
     }
     const databasePath = fileURLToPath(databaseUrl);
+    try {
+      const existing = await stat(databasePath);
+      if (!existing.isFile()) throw new Error("Database path is not a file");
+      if (existing.size === 0) throw new Error("Database file is zero bytes");
+    } catch (error) {
+      if (!isFileNotFound(error)) throw error;
+    }
     await mkdir(dirname(databasePath), { recursive: true });
     const instance = new SqliteSystemDatabase(
       new DatabaseSync(databasePath),
@@ -116,6 +138,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
   }
 
   async migrate(): Promise<void> {
+    const startedAt = performance.now();
     try {
       const migrations = await loadMigrationAssets();
       this.expectedMigrationChecksums = new Map(
@@ -141,6 +164,8 @@ export class SqliteSystemDatabase implements SystemDatabase {
     } catch (error) {
       this.migrationFailure = "Database migration verification failed";
       throw error;
+    } finally {
+      this.metrics?.observe("migration", performance.now() - startedAt);
     }
   }
 
@@ -155,6 +180,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
   }
 
   checkReadiness(): Promise<DatabaseReadiness> {
+    const startedAt = performance.now();
     try {
       if (this.migrationFailure !== undefined) {
         return Promise.resolve({
@@ -170,12 +196,20 @@ export class SqliteSystemDatabase implements SystemDatabase {
       if (foreignKeyFailures.length > 0) {
         throw new Error("Foreign key verification failed");
       }
+      const quickCheck = this.database.prepare("PRAGMA quick_check").get() as
+        | Record<string, string>
+        | undefined;
+      if (quickCheck === undefined || Object.values(quickCheck)[0] !== "ok") {
+        throw new Error("SQLite quick integrity check failed");
+      }
       return Promise.resolve({ status: "ready" });
     } catch {
       return Promise.resolve({
         status: "not_ready",
         message: "Database integrity verification failed",
       });
+    } finally {
+      this.metrics?.observe("databaseOperation", performance.now() - startedAt);
     }
   }
 
@@ -408,5 +442,13 @@ function isSqliteBusy(error: unknown): boolean {
     "code" in error &&
     (error as Error & { code?: string }).code === "ERR_SQLITE_ERROR" &&
     /busy|locked/i.test(error.message)
+  );
+}
+
+function isFileNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
   );
 }

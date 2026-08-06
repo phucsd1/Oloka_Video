@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApplication } from "../app.js";
 import { parseEnvironment } from "../config/environment.js";
@@ -22,8 +21,9 @@ async function createTestApplication() {
   return buildApplication({
     environment: parseEnvironment({
       NODE_ENV: "test",
-      DATA_DIR: dataDir,
-      DATABASE_URL: pathToFileURL(join(dataDir, "database", "test.db")).href,
+      OBJECT_STORAGE_ROOT: join(dataDir, "objects"),
+      DATABASE_PATH: join(dataDir, "database", "test.db"),
+      OLOKA_DATABASE_BOOTSTRAP_MODE: "fresh-if-replica-missing",
       APP_VERSION: "1.2.3",
       GIT_COMMIT_SHA: "abc123",
       BUILD_TIMESTAMP: "2026-08-05T01:00:00.000Z",
@@ -57,6 +57,8 @@ describe("system API", () => {
         configuration: { status: "ready" },
       },
     });
+    expect(response.body).not.toContain("test.db");
+    expect(response.body).not.toContain("/var/lib/oloka");
 
     await app.close();
   });

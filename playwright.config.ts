@@ -1,6 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 
 const dataDir = join(process.cwd(), ".tmp", "playwright-data");
 
@@ -21,9 +20,9 @@ export default defineConfig({
     env: {
       NODE_ENV: "test",
       PORT: "7860",
-      DATA_DIR: dataDir,
-      DATABASE_URL: pathToFileURL(join(dataDir, "database", "playwright.db"))
-        .href,
+      OBJECT_STORAGE_ROOT: join(dataDir, "objects"),
+      DATABASE_PATH: join(dataDir, "local", "playwright.db"),
+      OLOKA_DATABASE_BOOTSTRAP_MODE: "fresh-if-replica-missing",
       APP_VERSION: "0.1.0",
       GIT_COMMIT_SHA: "playwright",
       BUILD_TIMESTAMP: "playwright",
