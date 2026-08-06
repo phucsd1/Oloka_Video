@@ -107,7 +107,7 @@ printf 'PASS invalid start identity is rejected\n'
 child_pid=$!
 recorded_start_ticks="$(process_start_identity "$child_pid")"
 printf '%s\t%s\t%s\n' "$child_pid" "$recorded_start_ticks" "$handshake_nonce" >"$pid_file"
-chmod 600 "$pid_file"
+chmod 640 "$pid_file"
 invalid_expected_uid=$(( $(id -u) + 1 ))
 sudo chown "$invalid_expected_uid:$(id -g)" "$pid_file"
 if validate_pidfile_handshake "$pid_file" "$invalid_expected_uid" "$handshake_nonce"; then
