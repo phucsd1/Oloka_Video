@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/hf-s3-litestream-qualification.yml
       - scripts/hf-s3-qualification-database.mjs
+      - scripts/hf-s3-litestream-process-control.sh
+      - scripts/hf-s3-litestream-process-control.test.sh
       - scripts/run-hf-s3-litestream-qualification.sh
   workflow_dispatch:
 
@@ -36,6 +38,13 @@ jobs:
         with:
           node-version: 22.16.0
           cache: npm
+      - name: Test bounded Litestream process control
+        env:
+          HF_S3_ACCESS_KEY_ID: ""
+          HF_S3_SECRET_ACCESS_KEY: ""
+        run: |
+          timeout --signal=TERM --kill-after=2s 15s \
+            bash scripts/hf-s3-litestream-process-control.test.sh
       - name: Verify secret presence
         run: |
           test -n "$HF_S3_ACCESS_KEY_ID"
@@ -63,7 +72,9 @@ jobs:
           "$LITESTREAM_BIN" version
           aws --version
       - name: Qualify Litestream against isolated HF S3 prefix
-        run: bash scripts/run-hf-s3-litestream-qualification.sh
+        run: |
+          timeout --signal=TERM --kill-after=30s 12m \
+            bash scripts/run-hf-s3-litestream-qualification.sh
       - name: Upload qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
