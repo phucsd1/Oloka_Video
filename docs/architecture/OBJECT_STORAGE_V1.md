@@ -2,7 +2,7 @@
 
 ## Scope
 
-The MVP object adapter stores durable bytes beneath `/data/objects` and temporary upload bytes beneath `/data/tmp`. Runtime bytes are never written to Git and are not served by a public static mount. The interface is intentionally portable to S3-compatible storage later.
+The MVP object adapter stores durable bytes beneath `OBJECT_STORAGE_ROOT` (production `/data`) and temporary upload bytes beneath its staging area. Runtime bytes are never written to Git and are not served by a public static mount. The live SQLite primary is explicitly outside this root at `/var/lib/oloka/database/oloka.db`; `/data/database/oloka-dev.db` is legacy evidence only.
 
 ## Key and path contract
 
@@ -50,4 +50,4 @@ A periodic job compares active database references with the object manifest, det
 
 ## Limits
 
-The filesystem shares the Space availability zone and `/data` failure domain. It is persistence, not full disaster recovery. External replicated object storage is post-MVP and enters through this interface when scale/DR exit criteria in `TECHNICAL_ARCHITECTURE_V1.md` are met.
+The filesystem, same-bucket backup sets, and Litestream's HF S3 replica share provider/account failure domains. They improve persistence and rebuild recovery but are not independent disaster recovery. Litestream's database replica is durability transport and does not bypass this object-storage interface for product bytes.

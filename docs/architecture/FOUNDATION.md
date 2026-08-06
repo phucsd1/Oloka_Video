@@ -10,7 +10,7 @@ The browser depends on `@oloka/contracts` and `@oloka/design-system`. The server
 
 The database boundary is `SystemDatabase`. `SqliteSystemDatabase` is the MVP adapter and owns verified PRAGMAs, immutable migration assets, readiness, and a synchronous transaction runner. Repositories own SQL; routes do not. A PostgreSQL adapter is a documented scaling exit, not an implemented alternative.
 
-The persistent-data boundary is `ObjectStorage`. `FilesystemObjectStorage` owns all filesystem readiness work beneath `DATA_DIR`; future object-store implementations can replace it without changing HTTP handlers.
+The persistent-byte boundary is `ObjectStorage`. `FilesystemObjectStorage` owns filesystem readiness beneath `OBJECT_STORAGE_ROOT`; future object-store implementations can replace it without changing HTTP handlers. The local SQLite primary is configured separately by `DATABASE_PATH` and must remain outside that root.
 
 ## Request flow
 

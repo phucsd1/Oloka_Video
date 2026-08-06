@@ -1,12 +1,12 @@
 # Database Migration Strategy
 
-Status: normative Phase 2 design; no migration is created here.
+Status: normative; migrations v1/v2 are implemented and immutable.
 
 ## Contract
 
 Migrations are numbered, named, immutable, forward-only SQL assets executed before the HTTP listener starts. The runner records version, name, SHA-256 checksum, applied time, execution duration, and application build SHA in `schema_migrations`. It refuses startup on a checksum/name mismatch, gap, duplicate version, failed migration, or database schema newer than the application.
 
-The current foundation database is schema version 1. Phase 2 only designs version 2 and later. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
+The current Persistence Kernel database is schema version 2. Phase 3A.1 changes startup durability only: it creates no migration v3 and does not alter a byte of v1/v2. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
 
 ## Ledger compatibility
 
@@ -54,6 +54,7 @@ create a foreign key whose target table does not yet exist.
 
 ## Execution algorithm
 
+- Restore an absent local primary from the configured Litestream replica before the application opens SQLite. A non-zero restore exit always fails closed; missing replica permits fresh creation only under explicit `fresh-if-replica-missing`.
 - Open the database with the required PRAGMAs and acquire an application-wide migration lock.
 - Run integrity and ledger checks, discover migration assets, hash their exact UTF-8 bytes, and compare applied rows.
 - Create a pre-migration consistent backup before the first pending migration.
@@ -79,3 +80,9 @@ Never copy a live `.db` file independently of its WAL/SHM. Use the Node `node:sq
 - injected failure proves transaction rollback;
 - foreign-key and integrity checks;
 - backup restore into the prior application build.
+- three fresh local volumes restored successively from one pinned MinIO replica, proving witness counts 1/2/3 and a byte-stable v1/v2 ledger.
+
+Litestream 0.5.11 may create `_litestream_lock` and `_litestream_seq` for its own
+coordination. They are provider-internal runtime tables and never ledger
+entries, application migrations, or authorization/product entities. The
+application schema allowlist remains the six Slice 3A tables.

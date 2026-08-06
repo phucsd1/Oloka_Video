@@ -40,6 +40,11 @@ The final Slice 3A table allowlist is exactly:
 OAuth, sessions, projects, assets, composition, preview, render, provider,
 quota, and durable Job tables are intentionally absent.
 
+Litestream 0.5.11 owns two transport-internal runtime tables,
+`_litestream_lock` and `_litestream_seq`, while supervising the primary. They
+are not created by application migration v1/v2 and are excluded from the
+application table allowlist above.
+
 ## SQLite connection and transaction contract
 
 Every opened connection applies and verifies `foreign_keys=ON`, WAL journal
@@ -71,7 +76,7 @@ metadata validation or mutation. A fresh empty database can migrate without a
 key. The default layout is:
 
 ```text
-<DATA_DIR>/backups/pre-migration/<opaque-set>/
+<OBJECT_STORAGE_ROOT>/backups/pre-migration/<opaque-set>/
   database.sqlite
   manifest.json
   manifest.hmac
@@ -113,16 +118,23 @@ domain and are not external disaster recovery.
 
 ## Startup and operations
 
-Configuration is validated, SQLite is opened, PRAGMAs are verified, all
-migrations and required backup complete, and storage is probed before the
-listener opens. Failure closes SQLite and emits only a safe startup error code
-and error type. The success summary contains adapter/schema/checksum status but
-no key or filesystem path.
+Phase 3A.1 moves the live primary to
+`/var/lib/oloka/database/oloka.db`. Before the application opens it, the
+entrypoint validates configuration/path containment and performs a bounded
+Litestream restore when absent. Litestream then becomes PID 1 and supervises
+Fastify. Migrations/readiness run, `deployment.runtime` is updated through an
+optimistic short transaction, and storage is probed before listening. Failure
+emits safe error code/type only; no secret or public filesystem path is added.
 
-The validation workflow uses the exact Node patch, runs all existing quality
-gates, builds the production image, then starts it twice against one named
-volume with a test-only application key and requires `/api/ready` after both
-starts.
+The validation workflow uses exact Node/Litestream versions, runs all existing
+quality gates, and proves three starts against pinned MinIO while replacing the
+local DB volume after each stop. It requires counts 1/2/3, preserved first start,
+unchanged v1/v2 ledger, quick/FK integrity, bounded graceful signal handling,
+replica objects, and no credential in logs/config.
+
+Operational metrics are bounded aggregates, not per-SQL telemetry. Warning
+thresholds are database-operation p99 over 25 ms, transaction p99 over 20 ms,
+event-loop-delay p99 over 50 ms, or any observed `SQLITE_BUSY`.
 
 ## Explicit exclusions
 

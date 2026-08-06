@@ -1,23 +1,24 @@
 # Technical Architecture V1
 
-Status: Phase 2 blueprint; implementation is deferred to Phase 3.
+Status: Phase 2 blueprint with the accepted Phase 3A.1 durability correction.
 
 ## Decision summary
 
-Oloka Video MVP is one TypeScript modular monolith deployed as one Node.js 22 process in one Hugging Face Docker Space. Fastify owns HTTP, authentication, authorization, orchestration, delivery, and background dispatch. React/Vite is the browser client. SQLite and the Hugging Face persistent `/data` filesystem are the only durable stores. Modal is the only remote render provider.
+Oloka Video MVP is one TypeScript modular monolith deployed in one Hugging Face Docker Space. Litestream supervises one Node.js 22/Fastify application process. React/Vite is the browser client. SQLite is a local single-writer primary; Litestream transports recovery state to the HF S3 API. The `/data` mount stores object bytes and immutable backups, never the live SQLite database. Modal remains the only planned remote render provider.
 
 This document resolves the choices left open in `MVP_SYSTEM_BOUNDARY.md`; the Phase 1 product and domain contracts remain authoritative where this blueprint is silent.
 
-| Concern  | Locked choice                                                                   | Explicitly excluded from MVP                          |
-| -------- | ------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| Runtime  | Node.js 22.16.0 exact reviewed patch, TypeScript ESM, npm workspaces            | floating Node major, second backend, serverless split |
-| HTTP/UI  | Fastify 5, React, Vite, Zod contracts                                           | full-stack framework, duplicated API types            |
-| Database | `node:sqlite`, one database under `/data/database`                              | ORM, external database, replicas                      |
-| Bytes    | filesystem object adapter rooted at `/data/objects`                             | Git-tracked runtime bytes, S3/R2                      |
-| Jobs     | in-process dispatcher with durable SQLite leases/outbox                         | RAM-only queue, message broker                        |
-| Preview  | immutable authorized artifact using the trusted HyperFrames materializer/player | arbitrary HTML, per-project permanent preview servers |
-| Render   | Modal adapter behind typed provider boundary                                    | local production rendering, provider fan-out          |
-| Deploy   | one HF Docker Space, one app instance                                           | Cloudflare runtime, horizontal scale                  |
+| Concern    | Locked choice                                                                   | Explicitly excluded from MVP                          |
+| ---------- | ------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Runtime    | Node.js 22.16.0 exact reviewed patch, TypeScript ESM, npm workspaces            | floating Node major, second backend, serverless split |
+| HTTP/UI    | Fastify 5, React, Vite, Zod contracts                                           | full-stack framework, duplicated API types            |
+| Database   | `node:sqlite` at `/var/lib/oloka/database/oloka.db`, one writer                 | ORM, external SQL database, app replicas              |
+| Durability | Litestream 0.5.11 to HF S3 `sqlite-replica/dev`                                 | zero-data-loss claim, second app reader/writer        |
+| Bytes      | filesystem object adapter rooted beneath `/data`                                | Git-tracked runtime bytes, live SQLite under `/data`  |
+| Jobs       | in-process dispatcher with durable SQLite leases/outbox                         | RAM-only queue, message broker                        |
+| Preview    | immutable authorized artifact using the trusted HyperFrames materializer/player | arbitrary HTML, per-project permanent preview servers |
+| Render     | Modal adapter behind typed provider boundary                                    | local production rendering, provider fan-out          |
+| Deploy     | one HF Docker Space, one app instance                                           | Cloudflare runtime, horizontal scale                  |
 
 ## Component map
 
@@ -27,7 +28,10 @@ flowchart LR
   G["Google OIDC"] <--> F
   F --> C["Zod contracts and domain services"]
   C --> R["Repositories and transaction runner"]
-  R --> D[("SQLite /data/database")]
+  R --> D[("Local SQLite /var/lib/oloka")]
+  L["Litestream PID 1"] -->|"supervises"| F
+  D -->|"continuous replication"| L
+  L --> Q[("HF S3 sqlite-replica/dev")]
   C --> S["Filesystem object storage"]
   S --> O[("/data/objects")]
   U[("/data/tmp upload staging")] --> S
@@ -70,6 +74,7 @@ flowchart LR
 - IDs are UUIDv4 generated with `crypto.randomUUID()`.
 - Database timestamps are UTC Unix epoch milliseconds stored as SQLite `INTEGER`.
 - Connections enable `foreign_keys=ON`, `journal_mode=WAL`, `synchronous=FULL`, and `busy_timeout=5000`.
+- Startup restores the absent local primary before application start. Production requires an explicit `fresh-if-replica-missing` or `restore-required` policy and fails closed on every restore error.
 - `node:sqlite` is synchronous. Statements and transactions must be short; provider calls, filesystem streaming, checksums, and media analysis never run while a transaction is open.
 - Routes never contain SQL. All writes use a transaction runner and repository interfaces.
 - JSON is Zod-validated, schema-versioned, RFC 8785 canonicalized UTF-8 text. Search/filter/join fields remain normal columns.
@@ -85,7 +90,7 @@ flowchart LR
 
 ## Availability and scale envelope
 
-MVP intentionally supports one Space replica and one application process. WAL improves read/write overlap but does not make shared-filesystem multi-writer SQLite safe. Move to PostgreSQL when any of these become true: more than one application instance is required; sustained lock wait or write latency breaches the NFR; job throughput requires independent workers; backup/recovery objectives require managed point-in-time recovery; or the dataset/storage growth makes maintenance windows unacceptable. Object storage then moves behind the existing adapter to S3-compatible storage and dispatcher leases move to a multi-worker-capable database/queue. No part of that exit is implemented in Phase 2.
+MVP intentionally supports one Space and one application writer. WAL improves read/write overlap; Litestream adds recovery transport, not multi-writer safety. Move to PostgreSQL when any of these become true: more than one application instance is required; sustained lock wait or write latency breaches the NFR; job throughput requires independent workers; backup/recovery objectives require managed point-in-time recovery or an independent failure domain; or dataset/storage growth makes maintenance windows unacceptable. No part of that exit is implemented in Phase 3A.1.
 
 ## Source evidence
 
