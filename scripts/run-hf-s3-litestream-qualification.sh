@@ -42,9 +42,12 @@ failure_code=""
 failure_message=""
 failure_diagnostics='null'
 retry_uid=""
+retry_gid=""
+retry_dir=""
 retry_pid_file=""
-expected_retry_exe_identity=""
-initial_retry_exe_identity=""
+retry_handshake_nonce=""
+retry_directory_cleanup="not-needed"
+cleanup_permission_repair_applied=false
 rule_comment="oloka-litestream-${QUALIFICATION_RUN_ID}"
 ipv4_rejected_packets=0
 ipv6_rejected_packets=0
@@ -138,8 +141,8 @@ cleanup() {
   set +e
   cleanup_started_ms="$(date +%s%3N)"
   remove_network_rules
-  if [[ -z "$daemon_pid" && -n "$retry_pid_file" && -n "$retry_uid" && -n "$expected_retry_exe_identity" ]]; then
-    if validate_pidfile_handshake "$retry_pid_file" "$retry_uid" "$expected_retry_exe_identity"; then
+  if [[ -z "$daemon_pid" && -n "$retry_pid_file" && -n "$retry_uid" && -n "$retry_handshake_nonce" ]]; then
+    if validate_pidfile_handshake "$retry_pid_file" "$retry_uid" "$retry_handshake_nonce"; then
       daemon_pid="$PIDFILE_HANDSHAKE_PID"
     fi
   fi
@@ -158,28 +161,48 @@ cleanup() {
   if [[ -n "$daemon_wrapper_pid" ]] && ! process_is_alive "$daemon_wrapper_pid"; then
     wait "$daemon_wrapper_pid" >/dev/null 2>&1 || true
   fi
+  if [[ -n "$retry_dir" ]]; then
+    if remove_directory_with_permission_repair \
+      "$retry_dir" \
+      "$work_root" \
+      "$(id -u)" \
+      "$(id -g)"; then
+      retry_directory_cleanup="$DIRECTORY_CLEANUP_STATUS"
+      cleanup_permission_repair_applied="$DIRECTORY_CLEANUP_PERMISSION_REPAIR_APPLIED"
+    else
+      retry_directory_cleanup="fail"
+      cleanup_permission_repair_applied="$DIRECTORY_CLEANUP_PERMISSION_REPAIR_APPLIED"
+      cleanup_failed=1
+    fi
+  fi
   cleanup_duration_ms=$(( $(date +%s%3N) - cleanup_started_ms ))
   if [[ -f "$QUALIFICATION_REPORT_PATH" ]]; then
     atomic_report \
       --argjson durationMs "$cleanup_duration_ms" \
       --argjson daemonStopped "$daemon_stopped" \
       --argjson wrapperStopped "$wrapper_stopped" \
+      --arg retryDirectoryCleanup "$retry_directory_cleanup" \
+      --argjson cleanupPermissionRepairApplied "$cleanup_permission_repair_applied" \
       '.cleanup = {
         durationMs: $durationMs,
         daemonStopped: $daemonStopped,
         wrapperStopped: $wrapperStopped,
+        retryDirectoryCleanup: $retryDirectoryCleanup,
+        cleanupPermissionRepairApplied: $cleanupPermissionRepairApplied,
         bounded: true
       }' || true
   fi
-  rm -rf -- "$work_root"
+  if ! rm -rf -- "$work_root"; then
+    cleanup_failed=1
+  fi
   if [[ "$original_status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
     if [[ -f "$QUALIFICATION_REPORT_PATH" ]]; then
       atomic_report \
         '.status = "failure"
           | .currentStage = "cleanup"
           | .failure = {
-              code: "CLEANUP_PROCESS_TERMINATION_FAILED",
-              message: "Qualification cleanup could not stop every tracked process within bounded deadlines.",
+              code: "QUALIFICATION_CLEANUP_FAILED",
+              message: "Qualification cleanup could not safely stop processes or remove its exact temporary directory.",
               exitCode: 1,
               diagnostics: .cleanup
             }' || true
@@ -346,19 +369,18 @@ capture_retry_diagnostics() {
   local alive=false
   local pid_unchanged=false
   local identity_unchanged=false
-  local executable_identity_unchanged=false
-  local process_uid_valid=false
-  local executable_identity_valid=false
   local wrapper_alive=false
-  local pidfile_present=false
   local current_identity=""
-  local current_exe_identity=""
+  local observed_uid=""
   local tracked_pid="$initial_pid"
   local ipv4_packets=0
   local ipv6_packets=0
   local replica_objects=-1
-  if [[ ! "$tracked_pid" =~ ^[0-9]+$ || "$tracked_pid" -le 1 ]] && [[ -n "$retry_pid_file" && -s "$retry_pid_file" ]]; then
-    IFS= read -r tracked_pid <"$retry_pid_file" || tracked_pid=""
+  if [[ -n "$retry_pid_file" && -n "$retry_uid" && -n "$retry_handshake_nonce" ]]; then
+    validate_pidfile_handshake "$retry_pid_file" "$retry_uid" "$retry_handshake_nonce" || true
+  fi
+  if [[ ! "$tracked_pid" =~ ^[0-9]+$ || "$tracked_pid" -le 1 ]]; then
+    tracked_pid="$PIDFILE_HANDSHAKE_PID"
   fi
   if process_is_alive "$tracked_pid"; then
     alive=true
@@ -367,19 +389,9 @@ capture_retry_diagnostics() {
     if [[ -n "$current_identity" && "$current_identity" == "$initial_identity" ]]; then
       identity_unchanged=true
     fi
-    if [[ "$(process_uid "$tracked_pid" 2>/dev/null || true)" == "$retry_uid" ]]; then
-      process_uid_valid=true
-    fi
-    current_exe_identity="$(process_executable_identity "$tracked_pid" 2>/dev/null || true)"
-    if [[ -n "$current_exe_identity" && "$current_exe_identity" == "$expected_retry_exe_identity" ]]; then
-      executable_identity_valid=true
-    fi
-    if [[ -n "$current_exe_identity" && "$current_exe_identity" == "$initial_retry_exe_identity" ]]; then
-      executable_identity_unchanged=true
-    fi
+    observed_uid="$(process_uid "$tracked_pid" 2>/dev/null || true)"
   fi
   if process_is_alive "$daemon_wrapper_pid"; then wrapper_alive=true; fi
-  if [[ -n "$retry_pid_file" && -s "$retry_pid_file" ]]; then pidfile_present=true; fi
   ipv4_packets="$(rule_packet_count ipv4 || printf '0')"
   ipv6_packets="$(rule_packet_count ipv6 || printf '0')"
   ipv4_packets=$((ipv4_packets - ipv4_baseline_packets))
@@ -397,12 +409,19 @@ capture_retry_diagnostics() {
     --argjson elapsedMs "$elapsed_ms" \
     --argjson processAlive "$alive" \
     --argjson pidUnchanged "$pid_unchanged" \
-    --argjson processIdentityUnchanged "$identity_unchanged" \
-    --argjson executableIdentityUnchanged "$executable_identity_unchanged" \
+    --argjson processStartIdentityUnchanged "$identity_unchanged" \
     --argjson wrapperAlive "$wrapper_alive" \
-    --argjson pidfilePresent "$pidfile_present" \
-    --argjson processUidValid "$process_uid_valid" \
-    --argjson executableIdentityValid "$executable_identity_valid" \
+    --argjson pidfileExists "$PIDFILE_HANDSHAKE_FILE_EXISTS" \
+    --arg pidfileOwnerUid "$PIDFILE_HANDSHAKE_FILE_OWNER_UID" \
+    --arg pidfileMode "$PIDFILE_HANDSHAKE_FILE_MODE" \
+    --argjson pidParsed "$PIDFILE_HANDSHAKE_PID_PARSED" \
+    --argjson nonceMatched "$PIDFILE_HANDSHAKE_NONCE_VALID" \
+    --arg expectedUid "$retry_uid" \
+    --arg observedUid "${PIDFILE_HANDSHAKE_OBSERVED_UID:-$observed_uid}" \
+    --arg recordedStartTicks "$PIDFILE_HANDSHAKE_RECORDED_START_TICKS" \
+    --arg observedStartTicks "${PIDFILE_HANDSHAKE_OBSERVED_START_TICKS:-$current_identity}" \
+    --argjson handshakeElapsedMs "$PIDFILE_HANDSHAKE_DURATION_MS" \
+    --arg handshakeFailureReason "$PIDFILE_HANDSHAKE_FAILURE_REASON" \
     --argjson ipv4RejectedPackets "$ipv4_packets" \
     --argjson ipv6RejectedPackets "$ipv6_packets" \
     --argjson replicaObjectCount "$replica_objects" \
@@ -411,12 +430,19 @@ capture_retry_diagnostics() {
       elapsedMs: $elapsedMs,
       processAlive: $processAlive,
       pidUnchanged: $pidUnchanged,
-      processIdentityUnchanged: $processIdentityUnchanged,
-      executableIdentityUnchanged: $executableIdentityUnchanged,
+      processStartIdentityUnchanged: $processStartIdentityUnchanged,
       wrapperAlive: $wrapperAlive,
-      pidfilePresent: $pidfilePresent,
-      processUidValid: $processUidValid,
-      executableIdentityValid: $executableIdentityValid,
+      pidfileExists: $pidfileExists,
+      pidfileOwnerUid: $pidfileOwnerUid,
+      pidfileMode: $pidfileMode,
+      pidParsed: $pidParsed,
+      nonceMatched: $nonceMatched,
+      expectedUid: $expectedUid,
+      observedUid: $observedUid,
+      recordedStartTicks: $recordedStartTicks,
+      observedStartTicks: $observedStartTicks,
+      handshakeElapsedMs: $handshakeElapsedMs,
+      handshakeFailureReason: $handshakeFailureReason,
       ipv4RejectedPackets: $ipv4RejectedPackets,
       ipv6RejectedPackets: $ipv6RejectedPackets,
       replicaObjectCount: $replicaObjectCount,
@@ -424,7 +450,53 @@ capture_retry_diagnostics() {
     }')"
 }
 
+retry_identity_failure_code=""
+retry_identity_failure_message=""
+verify_retry_process_identity() {
+  local expected_pid="$1"
+  local expected_start_identity="$2"
+  retry_identity_failure_code="RETRY_PROCESS_IDENTITY_INVALID"
+  retry_identity_failure_message="Litestream same-process identity validation failed."
+
+  if ! validate_pidfile_handshake "$retry_pid_file" "$retry_uid" "$retry_handshake_nonce"; then
+    if [[ "$PIDFILE_HANDSHAKE_FAILURE_REASON" == "process-start-identity-mismatch" ]]; then
+      retry_identity_failure_code="RETRY_PROCESS_IDENTITY_CHANGED"
+      retry_identity_failure_message="Litestream process start identity changed."
+    elif [[ "$PIDFILE_HANDSHAKE_FAILURE_REASON" == "process-uid-mismatch" ]]; then
+      retry_identity_failure_code="RETRY_PROCESS_UID_CHANGED"
+      retry_identity_failure_message="Litestream process UID changed."
+    else
+      retry_identity_failure_code="RETRY_PROCESS_HANDSHAKE_REVALIDATION_FAILED"
+      retry_identity_failure_message="Litestream nonce handshake no longer validates."
+    fi
+    return 1
+  fi
+  if [[ "$PIDFILE_HANDSHAKE_PID" != "$expected_pid" ]]; then
+    retry_identity_failure_code="RETRY_PROCESS_PID_CHANGED"
+    retry_identity_failure_message="Litestream PID changed."
+    return 1
+  fi
+  if ! process_is_alive "$expected_pid"; then
+    retry_identity_failure_code="RETRY_PROCESS_NOT_ALIVE"
+    retry_identity_failure_message="Litestream process is not alive."
+    return 1
+  fi
+  if [[ "$(process_uid "$expected_pid")" != "$retry_uid" ]]; then
+    retry_identity_failure_code="RETRY_PROCESS_UID_CHANGED"
+    retry_identity_failure_message="Litestream process UID changed."
+    return 1
+  fi
+  if [[ "$(process_start_identity "$expected_pid")" != "$expected_start_identity" ]]; then
+    retry_identity_failure_code="RETRY_PROCESS_IDENTITY_CHANGED"
+    retry_identity_failure_message="Litestream process start identity changed."
+    return 1
+  fi
+}
+
 terminate_retry_process() {
+  if ! verify_retry_process_identity "$daemon_pid" "$initial_retry_identity"; then
+    fail_qualification "$retry_identity_failure_code" "$retry_identity_failure_message"
+  fi
   if ! terminate_process_bounded "$daemon_pid" 30 5; then
     fail_qualification "RETRY_PROCESS_TERMINATION_TIMEOUT" "Litestream did not exit within bounded TERM and KILL deadlines."
   fi
@@ -573,6 +645,7 @@ sleep 2
 abrupt_commit_json="$(node "$database_script" write "$database_path" 4)"
 abrupt_commit_ms="$(jq -r '.writtenAt' <<<"$abrupt_commit_json")"
 sleep 0.05
+abrupt_crash_ms="$(date +%s%3N)"
 kill -KILL "$daemon_pid"
 wait "$daemon_pid" 2>/dev/null || true
 daemon_pid=""
@@ -584,20 +657,33 @@ abrupt_restored_written_at="$(jq -r '.writtenAt' <<<"$abrupt_restore_json")"
 if ((abrupt_generation < 3 || abrupt_generation > 4)); then
   fail_qualification "ABRUPT_RESTORE_GENERATION_INVALID" "Abrupt termination restored an unexpected generation."
 fi
-abrupt_rpo_ms=$((abrupt_commit_ms - abrupt_restored_written_at))
-if ((abrupt_rpo_ms < 0)); then abrupt_rpo_ms=0; fi
+lost_committed_generations=$((4 - abrupt_generation))
+latest_commit_recovered=false
+if ((abrupt_generation == 4)); then latest_commit_recovered=true; fi
+commit_to_crash_ms=$((abrupt_crash_ms - abrupt_commit_ms))
+if ((commit_to_crash_ms < 0)); then commit_to_crash_ms=0; fi
+restored_state_age_at_crash_ms=$((abrupt_crash_ms - abrupt_restored_written_at))
+if ((restored_state_age_at_crash_ms < 0)); then restored_state_age_at_crash_ms=0; fi
 test_c_json="$(jq -n \
   --argjson committedGeneration 4 \
   --argjson restoredGeneration "$abrupt_generation" \
-  --argjson measuredRpoMs "$abrupt_rpo_ms" \
+  --argjson lostCommittedGenerations "$lost_committed_generations" \
+  --argjson latestCommitRecovered "$latest_commit_recovered" \
+  --argjson commitToCrashMs "$commit_to_crash_ms" \
+  --argjson restoredStateAgeAtCrashMs "$restored_state_age_at_crash_ms" \
+  --argjson measuredRpoMs "$restored_state_age_at_crash_ms" \
   --argjson restoreMs "$abrupt_restore_ms" \
   '{
     status: "pass",
     committedGeneration: $committedGeneration,
     restoredGeneration: $restoredGeneration,
+    lostCommittedGenerations: $lostCommittedGenerations,
+    latestCommitRecovered: $latestCommitRecovered,
+    commitToCrashMs: $commitToCrashMs,
+    restoredStateAgeAtCrashMs: $restoredStateAgeAtCrashMs,
     measuredRpoMs: $measuredRpoMs,
     restoreMs: $restoreMs,
-    rpoInterpretation: "Observed interval between the newest commit and the newest restored generation; this does not claim zero data loss."
+    rpoInterpretation: "measuredRpoMs equals restoredStateAgeAtCrashMs. This is one observed crash result with sparse test writes. It is not a guaranteed maximum RPO and does not claim zero data loss."
   }')"
 set_report_test "testC" "$test_c_json"
 
@@ -636,11 +722,14 @@ retry_db="$retry_dir/retry.db"
 retry_config="$work_root/retry-litestream.yml"
 retry_log="$work_root/retry.log"
 retry_litestream_bin="$work_root/litestream-retry"
+retry_process_control="$work_root/litestream-process-control.sh"
 retry_pid_file="$retry_dir/litestream.pid"
 mkdir -p "$retry_dir"
 node "$database_script" seed "$retry_db" 1 >/dev/null
 cp "$LITESTREAM_BIN" "$retry_litestream_bin"
 chmod 755 "$retry_litestream_bin"
+cp "$script_dir/hf-s3-litestream-process-control.sh" "$retry_process_control"
+chmod 644 "$retry_process_control"
 cat >"$retry_config" <<EOF
 logging:
   level: info
@@ -669,18 +758,26 @@ chmod 644 "$retry_config"
 sudo chown -R "$retry_uid:$retry_gid" "$retry_dir"
 install_network_rules
 
-expected_retry_exe_identity="$(stat -Lc '%d:%i' "$retry_litestream_bin")"
+retry_handshake_nonce="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+if [[ ! "$retry_handshake_nonce" =~ ^[0-9a-f]{64}$ ]]; then
+  fail_qualification "RETRY_HANDSHAKE_NONCE_GENERATION_FAILED" "Could not create the required 256-bit retry handshake nonce."
+fi
 ipv4_baseline_packets="$(rule_packet_count ipv4)"
 ipv6_baseline_packets="$(rule_packet_count ipv6)"
 outage_started_ms="$(date +%s%3N)"
 sudo --preserve-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,AWS_REGION,AWS_REQUEST_CHECKSUM_CALCULATION,AWS_RESPONSE_CHECKSUM_VALIDATION,LITESTREAM_ACCESS_KEY_ID,LITESTREAM_SECRET_ACCESS_KEY \
   -u nobody -- bash -c '
-    pid_file=$1
-    shift
-    printf "%s\n" "$$" >"$pid_file"
+    set -Eeuo pipefail
+    source "$1"
+    pid_file=$2
+    nonce=$3
+    shift 3
+    write_pidfile_handshake "$pid_file" "$nonce"
     exec "$@"
   ' bash \
+  "$retry_process_control" \
   "$retry_pid_file" \
+  "$retry_handshake_nonce" \
   "$retry_litestream_bin" replicate -config "$retry_config" \
   >"$retry_log" 2>&1 &
 daemon_wrapper_pid=$!
@@ -689,7 +786,7 @@ daemon_pid=""
 if ! wait_for_pidfile_handshake \
   "$retry_pid_file" \
   "$retry_uid" \
-  "$expected_retry_exe_identity" \
+  "$retry_handshake_nonce" \
   "$daemon_wrapper_pid" \
   10000 \
   200; then
@@ -700,8 +797,11 @@ daemon_pid="$PIDFILE_HANDSHAKE_PID"
 pidfile_handshake_ms="$PIDFILE_HANDSHAKE_DURATION_MS"
 
 initial_retry_pid="$daemon_pid"
-initial_retry_identity="$(process_start_identity "$initial_retry_pid")"
-initial_retry_exe_identity="$(process_executable_identity "$initial_retry_pid")"
+initial_retry_identity="$PIDFILE_HANDSHAKE_START_IDENTITY"
+if ! verify_retry_process_identity "$initial_retry_pid" "$initial_retry_identity"; then
+  capture_retry_diagnostics "$(( $(date +%s%3N) - outage_started_ms ))" "$initial_retry_pid" "$initial_retry_identity"
+  fail_qualification "$retry_identity_failure_code" "$retry_identity_failure_message"
+fi
 failure_observed_ms=""
 first_rejected_packet_observed_at_ms=0
 first_rejected_packet_family=""
@@ -714,19 +814,9 @@ previous_ipv6_packet_count="$ipv6_baseline_packets"
 while true; do
   now_ms="$(date +%s%3N)"
   elapsed_ms=$((now_ms - outage_started_ms))
-  if ! process_is_alive "$initial_retry_pid"; then
+  if ! verify_retry_process_identity "$initial_retry_pid" "$initial_retry_identity"; then
     capture_retry_diagnostics "$elapsed_ms" "$initial_retry_pid" "$initial_retry_identity"
-    fail_qualification "RETRY_PROCESS_EXITED_DURING_OUTAGE" "Litestream exited while HF S3 traffic was blocked."
-  fi
-  current_identity="$(process_start_identity "$initial_retry_pid")"
-  if [[ "$current_identity" != "$initial_retry_identity" ]]; then
-    capture_retry_diagnostics "$elapsed_ms" "$initial_retry_pid" "$initial_retry_identity"
-    fail_qualification "RETRY_PROCESS_IDENTITY_CHANGED" "Litestream process identity changed during the bounded outage."
-  fi
-  current_exe_identity="$(process_executable_identity "$initial_retry_pid")"
-  if [[ "$current_exe_identity" != "$initial_retry_exe_identity" ]]; then
-    capture_retry_diagnostics "$elapsed_ms" "$initial_retry_pid" "$initial_retry_identity"
-    fail_qualification "RETRY_PROCESS_EXECUTABLE_CHANGED" "Litestream executable identity changed during the bounded outage."
+    fail_qualification "$retry_identity_failure_code" "$retry_identity_failure_message"
   fi
   current_retry_objects="$(object_count "$prefix/retry/")"
   if [[ "$current_retry_objects" != "0" ]]; then
@@ -782,17 +872,9 @@ if (( $(rule_packet_count ipv4) != 0 || $(rule_packet_count ipv6) != 0 )); then
   capture_retry_diagnostics "$(( $(date +%s%3N) - outage_started_ms ))" "$initial_retry_pid" "$initial_retry_identity"
   fail_qualification "RETRY_NETWORK_RULE_REMOVAL_UNVERIFIED" "Exact qualification network rules remained after unblock."
 fi
-if ! process_is_alive "$initial_retry_pid"; then
+if ! verify_retry_process_identity "$initial_retry_pid" "$initial_retry_identity"; then
   capture_retry_diagnostics "$(( $(date +%s%3N) - outage_started_ms ))" "$initial_retry_pid" "$initial_retry_identity"
-  fail_qualification "RETRY_PROCESS_EXITED_BEFORE_RECOVERY" "Litestream exited before network recovery could be observed."
-fi
-if [[ "$(process_start_identity "$initial_retry_pid")" != "$initial_retry_identity" ]]; then
-  capture_retry_diagnostics "$(( $(date +%s%3N) - outage_started_ms ))" "$initial_retry_pid" "$initial_retry_identity"
-  fail_qualification "RETRY_PROCESS_IDENTITY_CHANGED" "Litestream process identity changed before network recovery."
-fi
-if [[ "$(process_executable_identity "$initial_retry_pid")" != "$initial_retry_exe_identity" ]]; then
-  capture_retry_diagnostics "$(( $(date +%s%3N) - outage_started_ms ))" "$initial_retry_pid" "$initial_retry_identity"
-  fail_qualification "RETRY_PROCESS_EXECUTABLE_CHANGED" "Litestream executable identity changed before network recovery."
+  fail_qualification "$retry_identity_failure_code" "$retry_identity_failure_message"
 fi
 
 recovery_started_ms="$(date +%s%3N)"
@@ -800,17 +882,9 @@ recovery_deadline_ms=$((recovery_started_ms + 120000))
 recovery_objects=0
 while true; do
   now_ms="$(date +%s%3N)"
-  if ! process_is_alive "$initial_retry_pid"; then
+  if ! verify_retry_process_identity "$initial_retry_pid" "$initial_retry_identity"; then
     capture_retry_diagnostics "$((now_ms - outage_started_ms))" "$initial_retry_pid" "$initial_retry_identity"
-    fail_qualification "RETRY_PROCESS_EXITED_DURING_RECOVERY" "Litestream exited while waiting for same-process recovery."
-  fi
-  if [[ "$(process_start_identity "$initial_retry_pid")" != "$initial_retry_identity" ]]; then
-    capture_retry_diagnostics "$((now_ms - outage_started_ms))" "$initial_retry_pid" "$initial_retry_identity"
-    fail_qualification "RETRY_PROCESS_IDENTITY_CHANGED" "Litestream process identity changed during recovery."
-  fi
-  if [[ "$(process_executable_identity "$initial_retry_pid")" != "$initial_retry_exe_identity" ]]; then
-    capture_retry_diagnostics "$((now_ms - outage_started_ms))" "$initial_retry_pid" "$initial_retry_identity"
-    fail_qualification "RETRY_PROCESS_EXECUTABLE_CHANGED" "Litestream executable identity changed during recovery."
+    fail_qualification "$retry_identity_failure_code" "$retry_identity_failure_message"
   fi
   recovery_objects="$(object_count "$prefix/retry/")"
   if ((recovery_objects > 0)); then
@@ -825,7 +899,18 @@ while true; do
 done
 
 terminate_retry_process
-rm -rf -- "$retry_dir"
+if ! remove_directory_with_permission_repair \
+  "$retry_dir" \
+  "$work_root" \
+  "$(id -u)" \
+  "$(id -g)"; then
+  retry_directory_cleanup="fail"
+  cleanup_permission_repair_applied="$DIRECTORY_CLEANUP_PERMISSION_REPAIR_APPLIED"
+  capture_retry_diagnostics "$(( $(date +%s%3N) - outage_started_ms ))" "$initial_retry_pid" "$initial_retry_identity"
+  fail_qualification "RETRY_DIRECTORY_CLEANUP_FAILED" "The exact retry directory could not be ownership-repaired and removed safely."
+fi
+retry_directory_cleanup="$DIRECTORY_CLEANUP_STATUS"
+cleanup_permission_repair_applied="$DIRECTORY_CLEANUP_PERMISSION_REPAIR_APPLIED"
 mkdir -p "$retry_dir"
 retry_restore_started_ms="$(date +%s%3N)"
 "$LITESTREAM_BIN" restore \
@@ -845,15 +930,17 @@ test_e_json="$(jq -n \
   --argjson minimumOutageMs "$minimum_outage_ms" \
   --argjson processStayedAlive true \
   --argjson pidUnchanged true \
-  --argjson processIdentityUnchanged true \
-  --argjson executableIdentityUnchanged true \
+  --argjson processStartIdentityUnchanged true \
   --argjson ipv4RejectedPackets "$ipv4_rejected_packets" \
   --argjson ipv6RejectedPackets "$ipv6_rejected_packets" \
   --argjson recoveryMs "$recovery_ms" \
   --argjson restoreMs "$retry_restore_ms" \
   --argjson pidfileHandshakeMs "$pidfile_handshake_ms" \
-  --argjson processUidValid "$PIDFILE_HANDSHAKE_UID_VALID" \
-  --argjson executableIdentityValid "$PIDFILE_HANDSHAKE_EXE_VALID" \
+  --argjson handshakeNonceValid "$PIDFILE_HANDSHAKE_NONCE_VALID" \
+  --argjson handshakeUidValid "$PIDFILE_HANDSHAKE_UID_VALID" \
+  --argjson handshakeStartIdentityValid "$PIDFILE_HANDSHAKE_START_IDENTITY_VALID" \
+  --arg retryDirectoryCleanup "$retry_directory_cleanup" \
+  --argjson cleanupPermissionRepairApplied "$cleanup_permission_repair_applied" \
   --arg firstRejectedPacketFamily "$first_rejected_packet_family" \
   --argjson gracefulTerminationMs "$retry_termination_ms" \
   --argjson evidence "$retry_verify_json" \
@@ -868,14 +955,16 @@ test_e_json="$(jq -n \
     minimumOutageMs: $minimumOutageMs,
     processStayedAlive: $processStayedAlive,
     pidUnchanged: $pidUnchanged,
-    processIdentityUnchanged: $processIdentityUnchanged,
-    executableIdentityUnchanged: $executableIdentityUnchanged,
+    processStartIdentityUnchanged: $processStartIdentityUnchanged,
     ipv4RejectedPackets: $ipv4RejectedPackets,
     ipv6RejectedPackets: $ipv6RejectedPackets,
     recoveryMs: $recoveryMs,
     pidfileHandshakeMs: $pidfileHandshakeMs,
-    processUidValid: $processUidValid,
-    executableIdentityValid: $executableIdentityValid,
+    handshakeNonceValid: $handshakeNonceValid,
+    handshakeUidValid: $handshakeUidValid,
+    handshakeStartIdentityValid: $handshakeStartIdentityValid,
+    retryDirectoryCleanup: $retryDirectoryCleanup,
+    cleanupPermissionRepairApplied: $cleanupPermissionRepairApplied,
     firstRejectedPacketFamily: $firstRejectedPacketFamily,
     gracefulTerminationMs: $gracefulTerminationMs,
     restoredGeneration: $evidence.generation,

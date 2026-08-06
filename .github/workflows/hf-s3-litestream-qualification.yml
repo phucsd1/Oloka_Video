@@ -38,12 +38,12 @@ jobs:
         with:
           node-version: 22.16.0
           cache: npm
-      - name: Test bounded Litestream process control
+      - name: Test proc-safe cross-UID Litestream process control
         env:
           HF_S3_ACCESS_KEY_ID: ""
           HF_S3_SECRET_ACCESS_KEY: ""
         run: |
-          timeout --signal=TERM --kill-after=2s 15s \
+          timeout --signal=TERM --kill-after=2s 20s \
             bash scripts/hf-s3-litestream-process-control.test.sh
       - name: Verify secret presence
         run: |
