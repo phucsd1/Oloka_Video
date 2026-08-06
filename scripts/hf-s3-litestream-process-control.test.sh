@@ -37,9 +37,12 @@ cleanup_test() {
 trap cleanup_test EXIT
 
 renamed_binary="$test_root/renamed-process-binary"
+process_control_copy="$test_root/process-control.sh"
 pid_file="$test_root/process.pid"
 cp /bin/sleep "$renamed_binary"
 chmod 755 "$renamed_binary"
+cp "$script_dir/hf-s3-litestream-process-control.sh" "$process_control_copy"
+chmod 644 "$process_control_copy"
 handshake_nonce="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 
 bash -c '
@@ -50,7 +53,7 @@ bash -c '
   shift 3
   write_pidfile_handshake "$pid_file" "$nonce"
   exec "$@"
-' bash "$script_dir/hf-s3-litestream-process-control.sh" "$pid_file" "$handshake_nonce" "$renamed_binary" 30 &
+' bash "$process_control_copy" "$pid_file" "$handshake_nonce" "$renamed_binary" 30 &
 child_pid=$!
 
 wait_for_pidfile_handshake \
@@ -175,7 +178,7 @@ sudo -u nobody -- bash -c '
   shift 3
   write_pidfile_handshake "$pid_file" "$nonce"
   exec "$@"
-' bash "$script_dir/hf-s3-litestream-process-control.sh" "$cross_uid_pid_file" "$cross_uid_nonce" "$renamed_binary" 30 &
+' bash "$process_control_copy" "$cross_uid_pid_file" "$cross_uid_nonce" "$renamed_binary" 30 &
 cross_wrapper_pid=$!
 wait_for_pidfile_handshake \
   "$cross_uid_pid_file" \
