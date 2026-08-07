@@ -80,6 +80,9 @@ describe("identity HTTP routes", () => {
       url: `/api/v1/auth/google/callback?code=one-use-code&state=${encodeURIComponent(state)}`,
     });
     expect(callback.statusCode).toBe(303);
+    expect(callback.headers.location).toBe("/");
+    expect(callback.body).not.toContain("one-use-code");
+    expect(callback.body).not.toContain(state);
     expect(callbackRequest).toMatchObject({
       expectedState: state,
       expectedNonce: authorizationRequest?.nonce,
@@ -98,10 +101,26 @@ describe("identity HTTP routes", () => {
       method: "GET",
       url: `/api/v1/auth/google/callback?code=replayed-code&state=${encodeURIComponent(state)}`,
     });
-    expect(replayedCallback.statusCode).toBe(401);
-    expect(replayedCallback.json().error.code).toBe(
-      "OAUTH_TRANSACTION_EXPIRED_OR_CONSUMED",
-    );
+    expect(replayedCallback.statusCode).toBe(303);
+    expect(replayedCallback.headers.location).toBe("/auth/error");
+    expect(replayedCallback.headers["cache-control"]).toBe("no-store");
+    expect(replayedCallback.headers.pragma).toBe("no-cache");
+    expect(replayedCallback.headers["referrer-policy"]).toBe("no-referrer");
+    expect(replayedCallback.body).not.toContain(state);
+    expect(replayedCallback.body).not.toContain("replayed-code");
+    const missingState = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/google/callback?code=missing-state-code",
+    });
+    expect(missingState.statusCode).toBe(303);
+    expect(missingState.headers.location).toBe("/auth/error");
+    expect(missingState.body).not.toContain("missing-state-code");
+    const invalidState = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/google/callback?code=invalid-state-code&state=not-a-real-state",
+    });
+    expect(invalidState.statusCode).toBe(303);
+    expect(invalidState.headers.location).toBe("/auth/error");
 
     const session = await app.inject({
       method: "GET",
@@ -123,6 +142,7 @@ describe("identity HTTP routes", () => {
     });
     expect(visitorAdmin.statusCode).toBe(401);
     expect(visitorAdmin.json().error.code).toBe("AUTHENTICATION_REQUIRED");
+    expectCanonicalError(visitorAdmin, "AUTHENTICATION_REQUIRED");
 
     nextIdentity = {
       subject: "google-subject-2",
@@ -142,9 +162,53 @@ describe("identity HTTP routes", () => {
       method: "GET",
       url: `/api/v1/auth/google/callback?code=member-code&state=${encodeURIComponent(memberState)}`,
     });
+    expect(memberCallback.headers.location).toBe("/account/pending");
     const memberCookie = (memberCallback.headers["set-cookie"] as string).split(
       ";",
     )[0]!;
+    const deniedStart = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/google/start",
+    });
+    const deniedState = new URL(deniedStart.headers.location!).searchParams.get(
+      "state",
+    )!;
+    const exchangesBeforeDenial = callbackRequest;
+    const denied = await app.inject({
+      method: "GET",
+      url: `/api/v1/auth/google/callback?error=access_denied&error_description=${encodeURIComponent("sensitive provider text")}&state=${encodeURIComponent(deniedState)}`,
+    });
+    expect(denied.statusCode).toBe(303);
+    expect(denied.headers.location).toBe("/auth/error");
+    expect(denied.body).not.toContain("sensitive provider text");
+    expect(callbackRequest).toBe(exchangesBeforeDenial);
+    const deniedReplay = await app.inject({
+      method: "GET",
+      url: `/api/v1/auth/google/callback?code=must-not-exchange&state=${encodeURIComponent(deniedState)}`,
+    });
+    expect(deniedReplay.statusCode).toBe(303);
+    expect(deniedReplay.headers.location).toBe("/auth/error");
+    expect(deniedReplay.headers["set-cookie"]).toBeUndefined();
+    expect(callbackRequest).toBe(exchangesBeforeDenial);
+    const ambiguousStart = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/google/start",
+    });
+    const ambiguousState = new URL(
+      ambiguousStart.headers.location!,
+    ).searchParams.get("state")!;
+    const ambiguous = await app.inject({
+      method: "GET",
+      url: `/api/v1/auth/google/callback?code=ambiguous-code&error=access_denied&state=${encodeURIComponent(ambiguousState)}`,
+    });
+    expect(ambiguous.statusCode).toBe(303);
+    expect(ambiguous.headers.location).toBe("/auth/error");
+    const ambiguousReplay = await app.inject({
+      method: "GET",
+      url: `/api/v1/auth/google/callback?code=must-not-exchange&state=${encodeURIComponent(ambiguousState)}`,
+    });
+    expect(ambiguousReplay.headers.location).toBe("/auth/error");
+    expect(callbackRequest).toBe(exchangesBeforeDenial);
     const pendingGate = await app.inject({
       method: "GET",
       url: "/api/v1/admin/users",
@@ -152,6 +216,7 @@ describe("identity HTTP routes", () => {
     });
     expect(pendingGate.statusCode).toBe(403);
     expect(pendingGate.json().error.code).toBe("ACCOUNT_PENDING");
+    expectCanonicalError(pendingGate, "ACCOUNT_PENDING");
 
     nextIdentity = {
       subject: "unverified-google-subject",
@@ -171,8 +236,10 @@ describe("identity HTTP routes", () => {
       method: "GET",
       url: `/api/v1/auth/google/callback?code=unverified-code&state=${encodeURIComponent(unverifiedState)}`,
     });
-    expect(unverifiedCallback.statusCode).toBe(401);
-    expect(unverifiedCallback.json().error.code).toBe("OAUTH_CLAIMS_INVALID");
+    expect(unverifiedCallback.statusCode).toBe(303);
+    expect(unverifiedCallback.headers.location).toBe("/auth/error");
+    expect(unverifiedCallback.body).not.toContain("unverified-code");
+    expect(unverifiedCallback.body).not.toContain(unverifiedState);
 
     const csrf = await app.inject({
       method: "GET",
@@ -187,6 +254,14 @@ describe("identity HTTP routes", () => {
       headers: { cookie: cookie.split(";")[0]! },
     });
     expect(users.statusCode, users.body).toBe(200);
+    const invalidCursor = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/users?cursor=not-base64url",
+      headers: { cookie: cookie.split(";")[0]! },
+    });
+    expect(invalidCursor.statusCode).toBe(400);
+    expect(invalidCursor.json().error.code).toBe("INVALID_CURSOR");
+    expectCanonicalError(invalidCursor, "INVALID_CURSOR");
     const pendingUser = users.json().users[0] as {
       id: string;
       version: number;
@@ -209,7 +284,8 @@ describe("identity HTTP routes", () => {
       payload: transitionBody,
     });
     expect(wrongOrigin.statusCode).toBe(403);
-    expect(wrongOrigin.json().error.code).toBe("CSRF_VALIDATION_FAILED");
+    expect(wrongOrigin.json().error.code).toBe("AUTHORIZATION_DENIED");
+    expectCanonicalError(wrongOrigin, "AUTHORIZATION_DENIED");
 
     const wrongToken = await app.inject({
       method: "PATCH",
@@ -224,7 +300,7 @@ describe("identity HTTP routes", () => {
       payload: transitionBody,
     });
     expect(wrongToken.statusCode).toBe(403);
-    expect(wrongToken.json().error.code).toBe("CSRF_VALIDATION_FAILED");
+    expect(wrongToken.json().error.code).toBe("AUTHORIZATION_DENIED");
 
     const missingOrigin = await app.inject({
       method: "PATCH",
@@ -238,7 +314,7 @@ describe("identity HTTP routes", () => {
       payload: transitionBody,
     });
     expect(missingOrigin.statusCode).toBe(403);
-    expect(missingOrigin.json().error.code).toBe("CSRF_VALIDATION_FAILED");
+    expect(missingOrigin.json().error.code).toBe("AUTHORIZATION_DENIED");
 
     const approved = await app.inject({
       method: "PATCH",
@@ -341,7 +417,8 @@ describe("identity HTTP routes", () => {
       url: "/api/v1/auth/session",
       headers: { cookie: secondAdminCookie },
     });
-    expect(loggedOutSession.json()).toEqual({ authenticated: false });
+    expect(loggedOutSession.statusCode).toBe(401);
+    expect(loggedOutSession.json().error.code).toBe("AUTHENTICATION_REQUIRED");
 
     const refreshedAdminSession = await app.inject({
       method: "GET",
@@ -376,8 +453,34 @@ describe("identity HTTP routes", () => {
       url: "/api/v1/auth/session",
       headers: { cookie: memberCookie },
     });
-    expect(revokedMemberSession.json()).toEqual({ authenticated: false });
+    expect(revokedMemberSession.statusCode).toBe(401);
+    expect(revokedMemberSession.json().error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
 
     await app.close();
   });
 });
+
+function expectCanonicalError(
+  response: {
+    json(): { error: Record<string, unknown> };
+    headers: Record<string, unknown>;
+  },
+  code: string,
+): void {
+  const body = response.json();
+  expect(body.error.code).toBe(code);
+  expect(Object.keys(body.error).sort()).toEqual([
+    "code",
+    "messageKey",
+    "requestId",
+    "retryable",
+    "suggestedAction",
+  ]);
+  expect(body.error.messageKey).toEqual(expect.any(String));
+  expect(body.error.suggestedAction).toEqual(expect.any(String));
+  expect(body.error.requestId).toBe(response.headers["x-request-id"]);
+  expect(body.error).not.toHaveProperty("message");
+  expect(body.error).not.toHaveProperty("correlationId");
+}

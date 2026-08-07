@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +25,150 @@ afterEach(async () => {
 });
 
 describe("admin user transitions", () => {
+  it("returns an authenticated opaque cursor rather than a plain user UUID", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-admin-cursor-"));
+    directories.push(directory);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(join(directory, "cursor.sqlite")).href,
+    );
+    databases.push(database);
+    await database.migrate();
+    seedUsersAndSessions(database);
+    const service = new AdminUserService(
+      database.transactions,
+      { now: () => 5_000 },
+      new UuidIdGenerator(),
+      Buffer.alloc(32, 7),
+    );
+
+    const firstPage = service.list({ limit: 2 });
+
+    expect(firstPage.users).toHaveLength(2);
+    expect(firstPage.nextCursor).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    expect(firstPage.nextCursor).not.toContain(firstPage.users[1]!.id);
+  });
+
+  it("binds an admin cursor to normalized status and search filters", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-admin-filter-"));
+    directories.push(directory);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(join(directory, "filter.sqlite")).href,
+    );
+    databases.push(database);
+    await database.migrate();
+    seedUsersAndSessions(database);
+    const service = new AdminUserService(
+      database.transactions,
+      { now: () => 5_000 },
+      new UuidIdGenerator(),
+      Buffer.alloc(32, 7),
+    );
+    const first = service.list({
+      status: "pending",
+      search: " MEMBER ",
+      limit: 1,
+    });
+
+    const second = service.list({
+      status: "pending",
+      search: "member",
+      cursor: first.nextCursor!,
+      limit: 1,
+    });
+
+    expect(second.users[0]?.id).not.toBe(first.users[0]?.id);
+    expect(
+      identityErrorCode(() =>
+        service.list({
+          status: "active",
+          search: "member",
+          cursor: first.nextCursor!,
+          limit: 1,
+        }),
+      ),
+    ).toBe("INVALID_CURSOR");
+  });
+
+  it("rejects malformed, tampered, and wrong-key admin cursors", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-admin-mac-"));
+    directories.push(directory);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(join(directory, "mac.sqlite")).href,
+    );
+    databases.push(database);
+    await database.migrate();
+    seedUsersAndSessions(database);
+    const service = new AdminUserService(
+      database.transactions,
+      { now: () => 5_000 },
+      new UuidIdGenerator(),
+      Buffer.alloc(32, 7),
+    );
+    const wrongKeyService = new AdminUserService(
+      database.transactions,
+      { now: () => 5_000 },
+      new UuidIdGenerator(),
+      Buffer.alloc(32, 8),
+    );
+    const cursor = service.list({ limit: 1 }).nextCursor!;
+    const tampered = `${cursor.slice(0, -1)}${cursor.endsWith("A") ? "B" : "A"}`;
+
+    for (const [candidateService, candidate] of [
+      [service, "not-base64url"],
+      [service, tampered],
+      [wrongKeyService, cursor],
+    ] as const) {
+      expect(
+        identityErrorCode(() =>
+          candidateService.list({ cursor: candidate, limit: 1 }),
+        ),
+      ).toBe("INVALID_CURSOR");
+    }
+  });
+
+  it("rejects an authenticated cursor with an unsupported schema version", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-admin-version-"));
+    directories.push(directory);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(join(directory, "version.sqlite")).href,
+    );
+    databases.push(database);
+    await database.migrate();
+    seedUsersAndSessions(database);
+    const applicationKey = Buffer.alloc(32, 7);
+    const service = new AdminUserService(
+      database.transactions,
+      { now: () => 5_000 },
+      new UuidIdGenerator(),
+      applicationKey,
+    );
+    const cursor = service.list({ limit: 1 }).nextCursor!;
+    const [payload] = cursor.split(".");
+    const decoded = JSON.parse(
+      Buffer.from(payload!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    const versionTwoPayload = Buffer.from(
+      JSON.stringify({ ...decoded, v: 2 }),
+      "utf8",
+    ).toString("base64url");
+    const cursorKey = hkdfSync(
+      "sha256",
+      applicationKey,
+      Buffer.from("oloka-video-identity", "utf8"),
+      Buffer.from("admin-users-cursor/v1", "utf8"),
+      32,
+    );
+    const mac = createHmac("sha256", Buffer.from(cursorKey))
+      .update(versionTwoPayload, "ascii")
+      .digest("base64url");
+
+    expect(
+      identityErrorCode(() =>
+        service.list({ cursor: `${versionTwoPayload}.${mac}`, limit: 1 }),
+      ),
+    ).toBe("INVALID_CURSOR");
+  });
+
   it("enforces state, version, idempotency, session, audit, and last-admin invariants", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-admin-contract-"));
     directories.push(directory);
@@ -39,6 +183,7 @@ describe("admin user transitions", () => {
       database.transactions,
       clock,
       new UuidIdGenerator(),
+      Buffer.alloc(32, 7),
     );
     const actor = adminSession(ids.adminOne);
 
@@ -127,7 +272,7 @@ describe("admin user transitions", () => {
           "disable-member-0001",
         ),
       ),
-    ).toBe("IDEMPOTENCY_KEY_CONFLICT");
+    ).toBe("IDEMPOTENCY_CONFLICT");
 
     service.transition(
       actor,

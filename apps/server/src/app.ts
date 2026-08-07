@@ -7,7 +7,6 @@ import {
 import Fastify, { LogController, type FastifyInstance } from "fastify";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { randomUUID } from "node:crypto";
 import type { AppEnvironment } from "./config/environment.js";
 import { createDatabase } from "./database/create-database.js";
 import { FilesystemObjectStorage } from "./storage/filesystem-object-storage.js";
@@ -20,6 +19,8 @@ import { OperationalMetrics } from "./observability/operational-metrics.js";
 import { registerIdentityRoutes } from "./identity/identity-routes.js";
 import type { OidcProviderClient } from "./identity/oidc-provider-client.js";
 import { IdentityMaintenanceService } from "./identity/identity-maintenance-service.js";
+import { registerErrorHandler } from "./http/error-handler.js";
+import { ApplicationError } from "./http/application-error.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -70,23 +71,7 @@ export async function buildApplication(
     );
   }
 
-  app.setErrorHandler((error, _request, reply) => {
-    const errorDetails: { statusCode?: unknown; code?: unknown } =
-      typeof error === "object" && error !== null ? error : {};
-    const validationFailure =
-      errorDetails.statusCode === 400 ||
-      errorDetails.code === "FST_ERR_VALIDATION";
-    return reply.code(validationFailure ? 400 : 500).send({
-      error: {
-        code: validationFailure ? "VALIDATION_FAILED" : "INTERNAL_ERROR",
-        message: validationFailure
-          ? "The request did not match the required contract"
-          : "The request could not be completed",
-        correlationId: randomUUID(),
-        retryable: !validationFailure,
-      },
-    });
-  });
+  registerErrorHandler(app);
 
   app.get("/api/health", () =>
     healthResponseSchema.parse(new HealthService().getHealth()),
@@ -137,27 +122,13 @@ export async function buildApplication(
     await app.register(fastifyStatic, { root: webRoot, wildcard: false });
     app.setNotFoundHandler(async (request, reply) => {
       if (request.url.startsWith("/api/"))
-        return reply.code(404).send({
-          error: {
-            code: "RESOURCE_NOT_FOUND",
-            message: "The requested API resource was not found",
-            correlationId: randomUUID(),
-            retryable: false,
-          },
-        });
+        throw new ApplicationError("RESOURCE_NOT_FOUND", "api_route_not_found");
       return reply.sendFile("index.html");
     });
   } else {
-    app.setNotFoundHandler(async (_request, reply) =>
-      reply.code(404).send({
-        error: {
-          code: "RESOURCE_NOT_FOUND",
-          message: "The requested API resource was not found",
-          correlationId: randomUUID(),
-          retryable: false,
-        },
-      }),
-    );
+    app.setNotFoundHandler(() => {
+      throw new ApplicationError("RESOURCE_NOT_FOUND", "api_route_not_found");
+    });
   }
 
   app.addHook("onClose", async () => {

@@ -234,6 +234,7 @@ transition_member_state() {
     import { pathToFileURL } from "node:url";
     import { SqliteSystemDatabase } from "/app/apps/server/dist/database/sqlite-system-database.js";
     import { AdminUserService } from "/app/apps/server/dist/identity/admin-user-service.js";
+    import { decodeApplicationKey } from "/app/apps/server/dist/kernel/app-key.js";
     const database = await SqliteSystemDatabase.connect(
       pathToFileURL("/var/lib/oloka/database/oloka.db").href,
     );
@@ -243,6 +244,7 @@ transition_member_state() {
         database.transactions,
         { now: () => Date.now() },
         { generate: () => randomUUID() },
+        decodeApplicationKey(process.env.OLOKA_APP_KEY),
       ).transition(
         {
           sessionId: "00000000-0000-4000-8000-000000000121",

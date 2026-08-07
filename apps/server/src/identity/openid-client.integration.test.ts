@@ -75,7 +75,7 @@ describe("openid-client adapter", () => {
     const flow = await authorize(mode);
     await expect(
       flow.adapter.exchangeCallback(flow.callbackRequest),
-    ).rejects.toBeDefined();
+    ).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE" });
   });
 
   it("rejects state and PKCE mismatches and a replayed provider code", async () => {
@@ -111,7 +111,26 @@ describe("openid-client adapter", () => {
     const flow = await authorize("token-timeout", 1);
     await expect(
       flow.adapter.exchangeCallback(flow.callbackRequest),
-    ).rejects.toBeDefined();
+    ).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
+  });
+
+  it("classifies unavailable OIDC discovery as PROVIDER_UNAVAILABLE", async () => {
+    const adapter = new OpenIdClientAdapter(
+      "http://127.0.0.1:1",
+      "test-client",
+      "test-client-secret",
+      { allowInsecureIssuer: true, timeoutSeconds: 1 },
+    );
+
+    await expect(
+      adapter.createAuthorizationUrl({
+        redirectUri: "https://oloka.example.test/api/v1/auth/google/callback",
+        state: "state",
+        nonce: "nonce",
+        codeChallenge: "challenge",
+        codeChallengeMethod: "S256",
+      }),
+    ).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
   });
 });
 

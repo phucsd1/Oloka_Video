@@ -1,4 +1,4 @@
-import { createHash, hkdfSync, randomBytes } from "node:crypto";
+import { createHash, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 
 export const SESSION_COOKIE_NAME = "__Host-oloka_session";
@@ -23,10 +23,7 @@ export function hashCoarseIpPrefix(
     Buffer.from("session-ip-prefix/v1", "utf8"),
     32,
   );
-  return createHash("sha256")
-    .update(Buffer.from(key))
-    .update(prefix, "utf8")
-    .digest();
+  return createHmac("sha256", Buffer.from(key)).update(prefix, "utf8").digest();
 }
 
 export function summarizeUserAgent(value: string | undefined): string | null {
@@ -93,7 +90,7 @@ export function readSessionCookie(header: string | undefined): string | null {
 }
 
 function coarseIpPrefix(ipAddress: string): string {
-  const address = ipAddress.startsWith("::ffff:")
+  const address = ipAddress.toLowerCase().startsWith("::ffff:")
     ? ipAddress.slice("::ffff:".length)
     : ipAddress;
   const family = isIP(address);

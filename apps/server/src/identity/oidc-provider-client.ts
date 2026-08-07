@@ -1,4 +1,5 @@
 import * as oidc from "openid-client";
+import { ApplicationError } from "../http/application-error.js";
 
 export interface OidcAuthorizationRequest {
   redirectUri: string;
@@ -44,7 +45,11 @@ export class OpenIdClientAdapter implements OidcProviderClient {
   async createAuthorizationUrl(
     request: OidcAuthorizationRequest,
   ): Promise<URL> {
-    const configuration = await this.getConfiguration();
+    const configuration = await this.getConfiguration().catch(
+      (error: unknown) => {
+        throw normalizeOidcError(error, "discovery");
+      },
+    );
     return oidc.buildAuthorizationUrl(configuration, {
       redirect_uri: request.redirectUri,
       response_type: "code",
@@ -60,17 +65,21 @@ export class OpenIdClientAdapter implements OidcProviderClient {
   async exchangeCallback(
     request: OidcCallbackRequest,
   ): Promise<OidcIdentityClaims> {
-    const configuration = await this.getConfiguration();
-    const tokens = await oidc.authorizationCodeGrant(
-      configuration,
-      request.callbackUrl,
-      {
+    const configuration = await this.getConfiguration().catch(
+      (error: unknown) => {
+        throw normalizeOidcError(error, "discovery");
+      },
+    );
+    const tokens = await oidc
+      .authorizationCodeGrant(configuration, request.callbackUrl, {
         expectedState: request.expectedState,
         expectedNonce: request.expectedNonce,
         pkceCodeVerifier: request.pkceCodeVerifier,
         idTokenExpected: true,
-      },
-    );
+      })
+      .catch((error: unknown) => {
+        throw normalizeOidcError(error, "callback");
+      });
     const claims = tokens.claims();
     if (
       claims === undefined ||
@@ -78,7 +87,10 @@ export class OpenIdClientAdapter implements OidcProviderClient {
       typeof claims.email !== "string" ||
       claims.email_verified !== true
     ) {
-      throw new Error("OIDC verified identity claims are incomplete");
+      throw new ApplicationError(
+        "INVALID_PROVIDER_RESPONSE",
+        "oidc_verified_claims_incomplete",
+      );
     }
     return {
       subject: claims.sub,
@@ -110,4 +122,49 @@ export class OpenIdClientAdapter implements OidcProviderClient {
     );
     return this.configuration;
   }
+}
+
+function normalizeOidcError(
+  error: unknown,
+  phase: "discovery" | "callback",
+): ApplicationError {
+  if (error instanceof ApplicationError) return error;
+  const signals = collectErrorSignals(error);
+  if (signals.some((signal) => /TIMEOUT|TIMEDOUT|ABORT/i.test(signal))) {
+    return new ApplicationError("PROVIDER_TIMEOUT", `oidc_${phase}_timeout`);
+  }
+  if (
+    phase === "discovery" ||
+    signals.some((signal) =>
+      /ECONN|ENOTFOUND|EAI_AGAIN|NETWORK|FETCH FAILED|SOCKET/i.test(signal),
+    )
+  ) {
+    return new ApplicationError(
+      "PROVIDER_UNAVAILABLE",
+      `oidc_${phase}_unavailable`,
+    );
+  }
+  return new ApplicationError(
+    "INVALID_PROVIDER_RESPONSE",
+    "oidc_callback_invalid",
+  );
+}
+
+function collectErrorSignals(error: unknown): string[] {
+  const signals: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== "object" || current === null) break;
+    const value = current as {
+      name?: unknown;
+      code?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+    for (const signal of [value.name, value.code, value.message]) {
+      if (typeof signal === "string") signals.push(signal);
+    }
+    current = value.cause;
+  }
+  return signals;
 }

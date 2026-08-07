@@ -1,9 +1,14 @@
-import type { IdentityUser, SessionSummary } from "@oloka/contracts";
+import type {
+  IdentityUser,
+  PublicErrorCode,
+  SessionSummary,
+} from "@oloka/contracts";
 import { createHash, randomBytes } from "node:crypto";
 import type { Clock } from "../kernel/clock.js";
 import type { IdGenerator } from "../kernel/id-generator.js";
 import { canonicalizeJson } from "../kernel/canonical-json.js";
 import type { TransactionRunner } from "../database/database.js";
+import { ApplicationError } from "../http/application-error.js";
 import { AuditEventRepository } from "../database/repositories/audit-event-repository.js";
 import {
   openPkceVerifier,
@@ -46,14 +51,13 @@ export interface AuthenticatedSession {
   user: IdentityUser;
 }
 
-export class IdentityError extends Error {
+export class IdentityError extends ApplicationError {
   constructor(
-    readonly code: string,
-    readonly statusCode: number,
-    readonly retryable: boolean,
-    message: string,
+    code: PublicErrorCode,
+    internalCause?: string,
+    responseHeaders?: Readonly<Record<string, string>>,
   ) {
-    super(message);
+    super(code, internalCause, responseHeaders);
     this.name = "IdentityError";
   }
 }
@@ -128,10 +132,8 @@ export class IdentityService {
     });
     if (!claims.emailVerified) {
       throw new IdentityError(
-        "OAUTH_CLAIMS_INVALID",
-        401,
-        false,
-        "Google did not provide a verified email identity",
+        "INVALID_PROVIDER_RESPONSE",
+        "oidc_claims_unverified",
       );
     }
     const result = this.establishIdentityAndSession(
@@ -143,6 +145,25 @@ export class IdentityService {
       sessionToken: result.sessionToken,
       returnPath: transaction.returnPath,
     };
+  }
+
+  denyAuthorization(
+    state: string,
+    category: "user_denied" | "provider_error" | "invalid_callback",
+  ): void {
+    const transaction = this.consumeOAuthTransaction(state);
+    const now = this.options.clock.now();
+    this.options.transactions.run("immediate", (context) => {
+      this.audit.append(context, {
+        actorType: "system",
+        action: "auth.oauth_callback_denied",
+        resourceType: "oauth_transaction",
+        resourceId: transaction.transactionId,
+        outcome: "denied",
+        metadata: { failureCategory: category },
+        createdAt: now,
+      });
+    });
   }
 
   getSession(rawToken: string | null): AuthenticatedSession | null {
@@ -330,6 +351,7 @@ export class IdentityService {
   }
 
   private consumeOAuthTransaction(state: string): {
+    transactionId: string;
     nonce: string;
     pkceCodeVerifier: string;
     returnPath: string;
@@ -357,27 +379,18 @@ export class IdentityService {
       return changed === 1 ? transaction : null;
     });
     if (row === undefined) {
-      throw new IdentityError(
-        "OAUTH_STATE_INVALID",
-        401,
-        true,
-        "The sign-in request is invalid",
-      );
+      throw new IdentityError("AUTHENTICATION_REQUIRED", "oauth_state_invalid");
     }
     if (row === null) {
       throw new IdentityError(
-        "OAUTH_TRANSACTION_EXPIRED_OR_CONSUMED",
-        401,
-        true,
-        "The sign-in request has expired or was already used",
+        "AUTHENTICATION_REQUIRED",
+        "oauth_transaction_expired_or_consumed",
       );
     }
     if (row.pkce_cipher_algorithm !== "AES-256-GCM") {
       throw new IdentityError(
-        "OAUTH_TRANSACTION_INVALID",
-        401,
-        false,
-        "The sign-in transaction could not be verified",
+        "AUTHENTICATION_REQUIRED",
+        "oauth_transaction_cipher_invalid",
       );
     }
     const opened = openPkceVerifier(this.options.applicationKey, row.id, {
@@ -396,13 +409,12 @@ export class IdentityService {
       !hashOpaqueToken(secret.nonce).equals(row.nonce_hash_sha256)
     ) {
       throw new IdentityError(
-        "OAUTH_TRANSACTION_INVALID",
-        401,
-        false,
-        "The sign-in transaction could not be verified",
+        "AUTHENTICATION_REQUIRED",
+        "oauth_transaction_secret_invalid",
       );
     }
     return {
+      transactionId: row.id,
       nonce: secret.nonce,
       pkceCodeVerifier: secret.pkceCodeVerifier,
       returnPath: row.return_path,
@@ -595,10 +607,8 @@ export class IdentityService {
     });
     if (result.kind === "identity_conflict") {
       throw new IdentityError(
-        "IDENTITY_LINK_CONFLICT",
-        409,
-        false,
-        "This Google identity cannot be linked automatically",
+        "RESOURCE_STATE_CONFLICT",
+        "identity_link_conflict",
       );
     }
     return { sessionToken };
@@ -648,12 +658,7 @@ function mapUser(row: SessionDatabaseRow): IdentityUser {
 function normalizeEmail(value: string): string {
   const email = value.trim().toLowerCase();
   if (email.length < 3 || email.length > 320 || !email.includes("@")) {
-    throw new IdentityError(
-      "OAUTH_CLAIMS_INVALID",
-      401,
-      false,
-      "Google identity claims are invalid",
-    );
+    throw new IdentityError("INVALID_PROVIDER_RESPONSE", "oidc_email_invalid");
   }
   return email;
 }
@@ -708,19 +713,12 @@ function containsControlCharacters(value: string): boolean {
 }
 
 function invalidReturnPath(): IdentityError {
-  return new IdentityError(
-    "VALIDATION_FAILED",
-    400,
-    false,
-    "The requested return path is invalid",
-  );
+  return new IdentityError("VALIDATION_ERROR", "return_path_invalid");
 }
 
 export function authenticationRequired(): IdentityError {
   return new IdentityError(
     "AUTHENTICATION_REQUIRED",
-    401,
-    false,
-    "Authentication is required",
+    "session_missing_or_invalid",
   );
 }

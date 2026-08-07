@@ -2,6 +2,7 @@ import type {
   AdminUserTransitionRequest,
   IdentityUser,
 } from "@oloka/contracts";
+import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import { sha256CanonicalJson } from "../kernel/canonical-json.js";
 import type { Clock } from "../kernel/clock.js";
 import type { IdGenerator } from "../kernel/id-generator.js";
@@ -14,14 +15,25 @@ import { IdentityError } from "./identity-service.js";
 export class AdminUserService {
   private readonly audit: AuditEventRepository;
   private readonly idempotency: IdempotencyRepository;
+  private readonly cursorKey: Buffer;
 
   constructor(
     private readonly transactions: TransactionRunner,
     private readonly clock: Clock,
     idGenerator: IdGenerator,
+    applicationKey: Uint8Array,
   ) {
     this.audit = new AuditEventRepository(idGenerator);
     this.idempotency = new IdempotencyRepository(idGenerator);
+    this.cursorKey = Buffer.from(
+      hkdfSync(
+        "sha256",
+        applicationKey,
+        Buffer.from("oloka-video-identity", "utf8"),
+        Buffer.from("admin-users-cursor/v1", "utf8"),
+        32,
+      ),
+    );
   }
 
   list(input: {
@@ -32,27 +44,31 @@ export class AdminUserService {
   }): { users: IdentityUser[]; nextCursor: string | null } {
     const clauses: string[] = [];
     const parameters: Array<string | number> = [];
+    const normalizedSearch = input.search?.trim().toLowerCase();
+    const filterHash = this.filterHash(input.status, normalizedSearch);
     if (input.status !== undefined) {
       clauses.push("status = ?");
       parameters.push(input.status);
     }
     if (input.cursor !== undefined) {
-      clauses.push("id > ?");
-      parameters.push(input.cursor);
+      const cursor = this.decodeCursor(input.cursor, filterHash);
+      clauses.push("(created_at > ? OR (created_at = ? AND id > ?))");
+      parameters.push(cursor.createdAt, cursor.createdAt, cursor.id);
     }
     if (input.search !== undefined) {
       clauses.push(
         "(email_normalized LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')",
       );
-      const search = `%${escapeLike(input.search.trim().toLowerCase())}%`;
+      const search = `%${escapeLike(normalizedSearch!)}%`;
       parameters.push(search, search);
     }
     const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
     const rows = this.transactions.run("read", ({ database }) =>
       database
         .prepare(
-          `SELECT id, email_normalized, display_name, avatar_url, role, status, version
-             FROM users ${where} ORDER BY id LIMIT ?`,
+          `SELECT id, email_normalized, display_name, avatar_url, role, status,
+                  version, created_at
+             FROM users ${where} ORDER BY created_at, id LIMIT ?`,
         )
         .all(...parameters, input.limit + 1),
     ) as unknown as UserRow[];
@@ -60,8 +76,87 @@ export class AdminUserService {
     const users = rows.slice(0, input.limit).map(mapUser);
     return {
       users,
-      nextCursor: hasMore ? (users.at(-1)?.id ?? null) : null,
+      nextCursor: hasMore
+        ? this.encodeCursor(rows[input.limit - 1]!, filterHash)
+        : null,
     };
+  }
+
+  private filterHash(
+    status: "pending" | "active" | "disabled" | "rejected" | undefined,
+    search: string | undefined,
+  ): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({ status: status ?? null, search: search ?? null }),
+        "utf8",
+      )
+      .digest("base64url");
+  }
+
+  private encodeCursor(row: UserRow, filterHash: string): string {
+    const payload = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        sort: { createdAt: row.created_at, id: row.id },
+        filterHash,
+      }),
+      "utf8",
+    ).toString("base64url");
+    const mac = createHmac("sha256", this.cursorKey)
+      .update(payload, "ascii")
+      .digest("base64url");
+    return `${payload}.${mac}`;
+  }
+
+  private decodeCursor(
+    value: string,
+    expectedFilterHash: string,
+  ): { createdAt: number; id: string } {
+    try {
+      if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+      const [payload, providedMac] = value.split(".") as [string, string];
+      const expectedMac = createHmac("sha256", this.cursorKey)
+        .update(payload, "ascii")
+        .digest();
+      const providedMacBytes = Buffer.from(providedMac, "base64url");
+      if (
+        providedMacBytes.length !== expectedMac.length ||
+        !timingSafeEqual(providedMacBytes, expectedMac)
+      ) {
+        throw new Error();
+      }
+      const decoded = JSON.parse(
+        Buffer.from(payload, "base64url").toString("utf8"),
+      ) as {
+        v?: unknown;
+        sort?: { createdAt?: unknown; id?: unknown };
+        filterHash?: unknown;
+      };
+      if (
+        decoded.v !== 1 ||
+        typeof decoded.sort?.createdAt !== "number" ||
+        !Number.isSafeInteger(decoded.sort.createdAt) ||
+        typeof decoded.sort.id !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          decoded.sort.id,
+        ) ||
+        typeof decoded.filterHash !== "string"
+      ) {
+        throw new Error();
+      }
+      const actualFilter = Buffer.from(decoded.filterHash, "utf8");
+      const requiredFilter = Buffer.from(expectedFilterHash, "utf8");
+      if (
+        actualFilter.length !== requiredFilter.length ||
+        !timingSafeEqual(actualFilter, requiredFilter)
+      ) {
+        throw new Error();
+      }
+      return { createdAt: decoded.sort.createdAt, id: decoded.sort.id };
+    } catch {
+      throw new IdentityError("INVALID_CURSOR", "admin_cursor_invalid");
+    }
   }
 
   transition(
@@ -90,11 +185,11 @@ export class AdminUserService {
       if (begin.kind !== "started" && begin.kind !== "retryable") {
         throw new IdentityError(
           begin.kind === "conflict"
-            ? "IDEMPOTENCY_KEY_CONFLICT"
+            ? "IDEMPOTENCY_CONFLICT"
             : "RESOURCE_STATE_CONFLICT",
-          409,
-          begin.kind !== "conflict",
-          "The admin command conflicts with an existing request",
+          begin.kind === "conflict"
+            ? "idempotency_semantic_conflict"
+            : "idempotency_record_not_available",
         );
       }
       const row = context.database
@@ -109,18 +204,11 @@ export class AdminUserService {
       if (row === undefined) {
         throw new IdentityError(
           "RESOURCE_NOT_FOUND",
-          404,
-          false,
-          "The requested user was not found",
+          "admin_target_user_not_found",
         );
       }
       if (row.version !== request.version) {
-        throw new IdentityError(
-          "VERSION_CONFLICT",
-          409,
-          true,
-          "The user changed before this command was applied",
-        );
+        throw new IdentityError("VERSION_CONFLICT", "admin_user_version_stale");
       }
       const nextRole = request.role ?? row.role;
       assertAllowedTransition(row.status, request.status, row.role, nextRole);
@@ -137,9 +225,7 @@ export class AdminUserService {
         if (activeAdmins.count <= 1) {
           throw new IdentityError(
             "RESOURCE_STATE_CONFLICT",
-            409,
-            false,
-            "The final active admin cannot be changed",
+            "last_active_admin_guard",
           );
         }
       }
@@ -174,9 +260,7 @@ export class AdminUserService {
       if (changed !== 1) {
         throw new IdentityError(
           "VERSION_CONFLICT",
-          409,
-          true,
-          "The user changed before this command was applied",
+          "admin_user_concurrent_update",
         );
       }
       const revokedSessions = context.database
@@ -256,6 +340,7 @@ interface UserRow {
   role: "member" | "admin";
   status: "pending" | "active" | "disabled" | "rejected";
   version: number;
+  created_at: number;
 }
 
 function mapUser(row: UserRow): IdentityUser {
@@ -291,9 +376,7 @@ function assertAllowedTransition(
   if (!allowedStatus || !allowedRole) {
     throw new IdentityError(
       "RESOURCE_STATE_CONFLICT",
-      409,
-      false,
-      "The requested user transition is not allowed",
+      "admin_user_transition_invalid",
     );
   }
 }

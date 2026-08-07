@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SqliteSystemDatabase } from "../database/sqlite-system-database.js";
 import type { Clock } from "../kernel/clock.js";
 import { UuidIdGenerator } from "../kernel/id-generator.js";
-import { IdentityService } from "./identity-service.js";
+import { IdentityError, IdentityService } from "./identity-service.js";
 import type {
   OidcAuthorizationRequest,
   OidcCallbackRequest,
@@ -79,7 +79,7 @@ describe("identity transaction contract", () => {
     expect(rejected).toMatchObject({
       status: "rejected",
       reason: expect.objectContaining({
-        code: "OAUTH_TRANSACTION_EXPIRED_OR_CONSUMED",
+        code: "AUTHENTICATION_REQUIRED",
       }),
     });
     expect(harness.callbackRequests).toHaveLength(1);
@@ -125,11 +125,73 @@ describe("identity transaction contract", () => {
         conflicting.searchParams.get("state")!,
         metadata,
       ),
-    ).rejects.toMatchObject({ code: "IDENTITY_LINK_CONFLICT" });
+    ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
     expect(readIdentityCounts(harness)).toEqual({
       users: 1,
       identities: 1,
       sessions: 2,
+    });
+  });
+
+  it("consumes a provider-denied transaction once without exchanging or creating identity data", async () => {
+    const harness = await createHarness({
+      subject: "must-not-be-created",
+      email: "denied@example.test",
+      emailVerified: true,
+      displayName: "Denied",
+      avatarUrl: null,
+    });
+    const start = await harness.service.startAuthorization();
+    const state = start.searchParams.get("state")!;
+
+    harness.service.denyAuthorization(state, "user_denied");
+
+    expect(
+      captureIdentityError(() =>
+        harness.service.denyAuthorization(state, "user_denied"),
+      ).code,
+    ).toBe("AUTHENTICATION_REQUIRED");
+    expect(harness.callbackRequests).toHaveLength(0);
+    expect(readIdentityCounts(harness)).toEqual({
+      users: 0,
+      identities: 0,
+      sessions: 0,
+    });
+    expect(
+      harness.database.transactions.run("read", ({ database }) =>
+        database
+          .prepare(
+            "SELECT metadata_json FROM audit_events WHERE action = 'auth.oauth_callback_denied'",
+          )
+          .get(),
+      ),
+    ).toEqual({ metadata_json: '{"failureCategory":"user_denied"}' });
+  });
+
+  it("rejects an expired OAuth transaction before provider exchange", async () => {
+    const harness = await createHarness({
+      subject: "expired-subject",
+      email: "expired@example.test",
+      emailVerified: true,
+      displayName: "Expired",
+      avatarUrl: null,
+    });
+    const start = await harness.service.startAuthorization();
+    const state = start.searchParams.get("state")!;
+    harness.clock.advance(10 * 60 * 1000 + 1);
+
+    await expect(
+      harness.service.finishAuthorization(
+        callbackFor(start, "expired-code"),
+        state,
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED" });
+    expect(harness.callbackRequests).toHaveLength(0);
+    expect(readIdentityCounts(harness)).toEqual({
+      users: 0,
+      identities: 0,
+      sessions: 0,
     });
   });
 
@@ -444,4 +506,14 @@ function readSession(
         revoke_reason: string | null;
       },
   );
+}
+
+function captureIdentityError(operation: () => unknown): IdentityError {
+  try {
+    operation();
+  } catch (error) {
+    if (error instanceof IdentityError) return error;
+    throw error;
+  }
+  throw new Error("Expected an identity error");
 }

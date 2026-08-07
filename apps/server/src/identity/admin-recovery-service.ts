@@ -20,10 +20,8 @@ export class AdminRecoveryService {
     const reason = input.reason.trim();
     if (reason.length < 10 || reason.length > 500) {
       throw new IdentityError(
-        "VALIDATION_FAILED",
-        400,
-        false,
-        "Admin recovery requires a bounded explicit reason",
+        "VALIDATION_ERROR",
+        "admin_recovery_reason_invalid",
       );
     }
     const now = this.clock.now();
@@ -41,10 +39,8 @@ export class AdminRecoveryService {
         | undefined;
       if (target === undefined) {
         throw new IdentityError(
-          "RECOVERY_IDENTITY_NOT_ELIGIBLE",
-          409,
-          false,
-          "Recovery requires an existing verified Google identity",
+          "RESOURCE_STATE_CONFLICT",
+          "recovery_identity_not_eligible",
         );
       }
       context.database

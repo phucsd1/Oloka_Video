@@ -6,8 +6,7 @@ import {
   csrfResponseSchema,
   sessionsResponseSchema,
 } from "@oloka/contracts";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { randomUUID } from "node:crypto";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AppEnvironment } from "../config/environment.js";
 import type { SystemDatabase } from "../database/database.js";
 import { SystemClock } from "../kernel/clock.js";
@@ -29,6 +28,7 @@ import {
   readSessionCookie,
 } from "./session-security.js";
 import { AdminUserService } from "./admin-user-service.js";
+import { parseIdempotencyKey } from "./idempotency-key.js";
 
 export interface RegisterIdentityRoutesOptions {
   app: FastifyInstance;
@@ -69,11 +69,15 @@ export function registerIdentityRoutes(
     applicationKey === undefined
       ? undefined
       : new BoundedIdentityRateLimiter(applicationKey);
-  const adminService = new AdminUserService(
-    database.transactions,
-    new SystemClock(),
-    new UuidIdGenerator(),
-  );
+  const adminService =
+    applicationKey === undefined
+      ? undefined
+      : new AdminUserService(
+          database.transactions,
+          new SystemClock(),
+          new UuidIdGenerator(),
+          applicationKey,
+        );
 
   app.addHook("onSend", async (request, reply, payload) => {
     if (
@@ -85,7 +89,12 @@ export function registerIdentityRoutes(
     }
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
-    reply.header("referrer-policy", "strict-origin-when-cross-origin");
+    reply.header(
+      "referrer-policy",
+      request.url.startsWith("/api/v1/auth/google/callback")
+        ? "no-referrer"
+        : "strict-origin-when-cross-origin",
+    );
     reply.header(
       "content-security-policy",
       "default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
@@ -104,30 +113,43 @@ export function registerIdentityRoutes(
   });
 
   app.get("/api/v1/auth/google/start", async (request, reply) => {
-    try {
-      const activeService = requireIdentityService(service);
-      limiter?.check("start", request.ip, 20, 60_000);
-      const query = request.query as { returnPath?: unknown };
-      const returnPath =
-        typeof query.returnPath === "string" ? query.returnPath : "/";
-      const destination = await activeService.startAuthorization(returnPath);
-      return reply.code(302).header("location", destination.href).send();
-    } catch (error) {
-      return sendIdentityError(reply, error);
-    }
+    const activeService = requireIdentityService(service);
+    limiter?.check("start", request.ip, 20, 60_000);
+    const query = request.query as { returnPath?: unknown };
+    const returnPath =
+      typeof query.returnPath === "string" ? query.returnPath : "/";
+    const destination = await activeService.startAuthorization(returnPath);
+    return reply.code(302).header("location", destination.href).send();
   });
 
   app.get("/api/v1/auth/google/callback", async (request, reply) => {
     try {
       const activeService = requireIdentityService(service);
-      const query = request.query as { state?: unknown; code?: unknown };
-      if (typeof query.state !== "string" || typeof query.code !== "string") {
+      const query = request.query as {
+        state?: unknown;
+        code?: unknown;
+        error?: unknown;
+      };
+      if (typeof query.state !== "string") {
         throw new IdentityError(
-          "OAUTH_CALLBACK_INVALID",
-          400,
-          true,
-          "The Google callback is incomplete",
+          "VALIDATION_ERROR",
+          "oauth_callback_incomplete",
         );
+      }
+      if (typeof query.error === "string") {
+        activeService.denyAuthorization(
+          query.state,
+          typeof query.code === "string"
+            ? "invalid_callback"
+            : query.error === "access_denied"
+              ? "user_denied"
+              : "provider_error",
+        );
+        return reply.code(303).header("location", "/auth/error").send();
+      }
+      if (typeof query.code !== "string") {
+        activeService.denyAuthorization(query.state, "invalid_callback");
+        return reply.code(303).header("location", "/auth/error").send();
       }
       const callbackUrl = new URL(
         request.url,
@@ -151,178 +173,174 @@ export function registerIdentityRoutes(
       try {
         limiter?.check("callback-failure", request.ip, 30, 60_000);
       } catch (limited) {
-        return sendIdentityError(reply, limited);
+        if (limited instanceof IdentityError) {
+          for (const [name, value] of Object.entries(
+            limited.responseHeaders ?? {},
+          )) {
+            reply.header(name, value);
+          }
+        }
       }
-      return sendIdentityError(reply, error);
+      request.log.info(
+        {
+          event: "identity.oauth_callback.denied",
+          requestId: request.id,
+          failureCategory: callbackFailureCategory(error),
+        },
+        "OAuth callback failed",
+      );
+      return reply.code(303).header("location", "/auth/error").send();
     }
   });
 
   app.get("/api/v1/auth/session", async (request, reply) => {
     const session = resolveSession(service, request);
+    if (session === null) throw authenticationRequired();
     return reply.send(
-      authSessionResponseSchema.parse(
-        session === null
-          ? { authenticated: false }
-          : { authenticated: true, user: session.user },
-      ),
+      authSessionResponseSchema.parse({
+        authenticated: true,
+        user: session.user,
+      }),
     );
   });
 
   app.get("/api/v1/auth/csrf", async (request, reply) => {
-    try {
-      const activeService = requireIdentityService(service);
-      const session = requireSession(activeService, request);
-      return reply.send(
-        csrfResponseSchema.parse({
-          csrfToken: activeService.rotateCsrfToken(session.sessionId),
-        }),
-      );
-    } catch (error) {
-      return sendIdentityError(reply, error);
-    }
+    const activeService = requireIdentityService(service);
+    const session = requireSession(activeService, request);
+    return reply.send(
+      csrfResponseSchema.parse({
+        csrfToken: activeService.rotateCsrfToken(session.sessionId),
+      }),
+    );
   });
 
   app.get("/api/v1/auth/sessions", async (request, reply) => {
-    try {
-      const activeService = requireIdentityService(service);
-      const session = requireSession(activeService, request);
-      return reply.send(
-        sessionsResponseSchema.parse({
-          sessions: activeService.listSessions(session),
-        }),
-      );
-    } catch (error) {
-      return sendIdentityError(reply, error);
-    }
+    const activeService = requireIdentityService(service);
+    const session = requireSession(activeService, request);
+    return reply.send(
+      sessionsResponseSchema.parse({
+        sessions: activeService.listSessions(session),
+      }),
+    );
   });
 
   app.post("/api/v1/auth/logout", async (request, reply) => {
-    try {
-      const activeService = requireIdentityService(service);
-      const session = requireSession(activeService, request);
-      verifyCsrfRequest(
-        activeService,
-        session,
-        request,
-        configuration?.publicOrigin,
-        limiter,
-      );
-      activeService.logout(session);
-      return reply.code(204).header("set-cookie", clearSessionCookie()).send();
-    } catch (error) {
-      return sendIdentityError(reply, error);
-    }
+    const activeService = requireIdentityService(service);
+    const session = requireSession(activeService, request);
+    verifyCsrfRequest(
+      activeService,
+      session,
+      request,
+      configuration?.publicOrigin,
+      limiter,
+    );
+    activeService.logout(session);
+    return reply.code(204).header("set-cookie", clearSessionCookie()).send();
   });
 
   app.post("/api/v1/auth/sessions/revoke-all", async (request, reply) => {
-    try {
-      const activeService = requireIdentityService(service);
-      const session = requireSession(activeService, request);
-      verifyCsrfRequest(
-        activeService,
-        session,
-        request,
-        configuration?.publicOrigin,
-        limiter,
-      );
-      activeService.revokeAllSessions(session);
-      return reply.code(204).header("set-cookie", clearSessionCookie()).send();
-    } catch (error) {
-      return sendIdentityError(reply, error);
-    }
+    const activeService = requireIdentityService(service);
+    const session = requireSession(activeService, request);
+    verifyCsrfRequest(
+      activeService,
+      session,
+      request,
+      configuration?.publicOrigin,
+      limiter,
+    );
+    activeService.revokeAllSessions(session);
+    return reply.code(204).header("set-cookie", clearSessionCookie()).send();
   });
 
   app.get("/api/v1/admin/users", async (request, reply) => {
-    try {
-      const activeService = requireIdentityService(service);
-      const session = requireAdmin(activeService, request);
-      const query = adminUsersQuerySchema.parse(request.query);
-      void session;
-      return reply.send(
-        adminUsersResponseSchema.parse(adminService.list(query)),
-      );
-    } catch (error) {
-      return sendIdentityError(reply, normalizeValidationError(error));
+    const activeService = requireIdentityService(service);
+    const session = requireAdmin(activeService, request);
+    const parsedQuery = adminUsersQuerySchema.safeParse(request.query);
+    if (!parsedQuery.success) {
+      const rawQuery = request.query as { cursor?: unknown };
+      if (rawQuery.cursor !== undefined) {
+        throw new IdentityError("INVALID_CURSOR", "admin_cursor_malformed");
+      }
+      throw parsedQuery.error;
     }
+    const query = parsedQuery.data;
+    void session;
+    return reply.send(
+      adminUsersResponseSchema.parse(
+        requireAdminService(adminService).list(query),
+      ),
+    );
   });
 
   app.patch("/api/v1/admin/users/:userId", async (request, reply) => {
-    try {
-      const activeService = requireIdentityService(service);
-      const session = requireAdmin(activeService, request);
-      verifyCsrfRequest(
-        activeService,
-        session,
-        request,
-        configuration?.publicOrigin,
-        limiter,
-      );
-      const parameters = request.params as { userId?: unknown };
-      if (
-        typeof parameters.userId !== "string" ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-          parameters.userId,
-        )
-      ) {
-        throw validationFailed();
-      }
-      const idempotencyKey = request.headers["idempotency-key"];
-      if (
-        typeof idempotencyKey !== "string" ||
-        idempotencyKey.length < 8 ||
-        idempotencyKey.length > 200
-      ) {
-        throw new IdentityError(
-          "IDEMPOTENCY_KEY_REQUIRED",
-          400,
-          false,
-          "A valid Idempotency-Key header is required",
-        );
-      }
-      const command = adminUserTransitionRequestSchema.parse(request.body);
-      const result = adminService.transition(
-        session,
+    const activeService = requireIdentityService(service);
+    const session = requireAdmin(activeService, request);
+    verifyCsrfRequest(
+      activeService,
+      session,
+      request,
+      configuration?.publicOrigin,
+      limiter,
+    );
+    const parameters = request.params as { userId?: unknown };
+    if (
+      typeof parameters.userId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
         parameters.userId,
-        command,
-        idempotencyKey,
-      );
-      return reply
-        .header("idempotency-replayed", result.replayed ? "true" : "false")
-        .send({ user: result.user });
-    } catch (error) {
-      return sendIdentityError(reply, normalizeValidationError(error));
+      )
+    ) {
+      throw new IdentityError("VALIDATION_ERROR", "admin_user_id_invalid");
     }
+    const idempotencyKey = parseIdempotencyKey(
+      request.headers["idempotency-key"],
+    );
+    const command = adminUserTransitionRequestSchema.parse(request.body);
+    const result = requireAdminService(adminService).transition(
+      session,
+      parameters.userId,
+      command,
+      idempotencyKey,
+    );
+    return reply
+      .header("idempotency-replayed", result.replayed ? "true" : "false")
+      .send({ user: result.user });
   });
+}
+
+function callbackFailureCategory(error: unknown): string {
+  if (!(error instanceof IdentityError)) return "provider_error";
+  if (error.internalCause === "oauth_transaction_expired_or_consumed") {
+    return "invalid_callback";
+  }
+  if (error.code === "AUTHENTICATION_REQUIRED") return "invalid_callback";
+  return "provider_error";
+}
+
+function requireAdminService(
+  service: AdminUserService | undefined,
+): AdminUserService {
+  if (service === undefined) {
+    throw new IdentityError(
+      "PROVIDER_UNAVAILABLE",
+      "identity_configuration_unavailable",
+    );
+  }
+  return service;
 }
 
 export function requireActiveUser(session: AuthenticatedSession): void {
   const decisions: Record<
     Exclude<AuthenticatedSession["user"]["status"], "active">,
-    { code: string; message: string; retryable: boolean }
+    "ACCOUNT_PENDING" | "ACCOUNT_DISABLED" | "ACCOUNT_REJECTED"
   > = {
-    pending: {
-      code: "ACCOUNT_PENDING",
-      message: "Your account is waiting for approval",
-      retryable: true,
-    },
-    disabled: {
-      code: "ACCOUNT_DISABLED",
-      message: "Your account is disabled",
-      retryable: false,
-    },
-    rejected: {
-      code: "ACCOUNT_REJECTED",
-      message: "Your account request was rejected",
-      retryable: false,
-    },
+    pending: "ACCOUNT_PENDING",
+    disabled: "ACCOUNT_DISABLED",
+    rejected: "ACCOUNT_REJECTED",
   };
   if (session.user.status === "active") return;
-  const decision = decisions[session.user.status];
   throw new IdentityError(
-    decision.code,
-    403,
-    decision.retryable,
-    decision.message,
+    decisions[session.user.status],
+    `account_${session.user.status}`,
   );
 }
 
@@ -353,9 +371,7 @@ function requireAdmin(
   if (session.user.role !== "admin") {
     throw new IdentityError(
       "AUTHORIZATION_DENIED",
-      403,
-      false,
-      "This operation requires an administrator",
+      "administrator_role_required",
     );
   }
   return session;
@@ -400,12 +416,7 @@ function verifyCsrfRequest(
   if (failureCategory !== undefined) {
     service.auditCsrfFailure(session, failureCategory);
     limiter?.check("csrf-failure", request.ip, 30, 60_000);
-    throw new IdentityError(
-      "CSRF_VALIDATION_FAILED",
-      403,
-      false,
-      "The request could not be verified",
-    );
+    throw new IdentityError("AUTHORIZATION_DENIED", `csrf_${failureCategory}`);
   }
 }
 
@@ -414,28 +425,11 @@ function requireIdentityService(
 ): IdentityService {
   if (service === undefined) {
     throw new IdentityError(
-      "IDENTITY_CONFIGURATION_UNAVAILABLE",
-      503,
-      true,
-      "Identity service is not configured",
+      "PROVIDER_UNAVAILABLE",
+      "identity_configuration_unavailable",
     );
   }
   return service;
-}
-
-function normalizeValidationError(error: unknown): unknown {
-  return error instanceof Error && error.name === "ZodError"
-    ? validationFailed()
-    : error;
-}
-
-function validationFailed(): IdentityError {
-  return new IdentityError(
-    "VALIDATION_FAILED",
-    400,
-    false,
-    "The request did not match the required contract",
-  );
 }
 
 function requestMetadata(request: FastifyRequest): {
@@ -449,30 +443,7 @@ function requestMetadata(request: FastifyRequest): {
   };
 }
 
-export function sendIdentityError(
-  reply: FastifyReply,
-  error: unknown,
-): FastifyReply {
-  const identityError =
-    error instanceof IdentityError
-      ? error
-      : new IdentityError(
-          "IDENTITY_PROVIDER_FAILURE",
-          502,
-          true,
-          "The identity provider request failed",
-        );
-  return reply.code(identityError.statusCode).send({
-    error: {
-      code: identityError.code,
-      message: identityError.message,
-      correlationId: randomUUID(),
-      retryable: identityError.retryable,
-    },
-  });
-}
-
-class BoundedIdentityRateLimiter {
+export class BoundedIdentityRateLimiter {
   private readonly entries = new Map<
     string,
     { count: number; resetAt: number }
@@ -497,12 +468,11 @@ class BoundedIdentityRateLimiter {
     }
     current.count += 1;
     if (current.count > maximum) {
-      throw new IdentityError(
-        "RATE_LIMITED",
-        429,
-        true,
-        "Too many identity requests",
-      );
+      throw new IdentityError("RATE_LIMITED", "identity_rate_limit_exceeded", {
+        "retry-after": String(
+          Math.max(1, Math.ceil((current.resetAt - now) / 1000)),
+        ),
+      });
     }
   }
 }

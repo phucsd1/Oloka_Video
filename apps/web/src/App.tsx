@@ -2,6 +2,7 @@ import {
   adminUsersResponseSchema,
   authSessionResponseSchema,
   csrfResponseSchema,
+  errorEnvelopeSchema,
   type IdentityUser,
 } from "@oloka/contracts";
 import { Surface } from "@oloka/design-system";
@@ -11,44 +12,77 @@ type AppState =
   | { kind: "loading" }
   | { kind: "visitor" }
   | { kind: "authenticated"; user: IdentityUser }
-  | { kind: "error"; message: string };
+  | {
+      kind: "error";
+      message: string;
+      requestId?: string;
+      messageKey?: string;
+    };
+
+class ApiError extends Error {
+  constructor(
+    readonly code: string,
+    readonly messageKey: string,
+    readonly suggestedAction: string,
+    readonly requestId: string,
+  ) {
+    super(suggestedAction);
+    this.name = "ApiError";
+  }
+}
 
 async function getJson(path: string): Promise<unknown> {
   const response = await fetch(path, {
     headers: { accept: "application/json" },
   });
-  if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+  if (!response.ok) {
+    const envelope = errorEnvelopeSchema.parse(await response.json());
+    throw new ApiError(
+      envelope.error.code,
+      envelope.error.messageKey,
+      envelope.error.suggestedAction,
+      envelope.error.requestId,
+    );
+  }
   return response.json();
 }
 
 export function App() {
   const [state, setState] = useState<AppState>({ kind: "loading" });
   const csrfToken = useRef<string | null>(null);
+  const authErrorRoute = window.location.pathname === "/auth/error";
 
   useEffect(() => {
+    if (authErrorRoute) return;
     let active = true;
     getJson("/api/v1/auth/session")
       .then((value) => authSessionResponseSchema.parse(value))
       .then((session) => {
         if (!active) return;
-        setState(
-          session.authenticated
-            ? { kind: "authenticated", user: session.user }
-            : { kind: "visitor" },
-        );
+        setState({ kind: "authenticated", user: session.user });
       })
       .catch((error: unknown) => {
         if (!active) return;
-        setState({
-          kind: "error",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
+        if (
+          error instanceof ApiError &&
+          error.code === "AUTHENTICATION_REQUIRED"
+        ) {
+          setState({ kind: "visitor" });
+        } else {
+          setState({
+            kind: "error",
+            message: error instanceof Error ? error.message : "Unknown error",
+            ...(error instanceof ApiError
+              ? { requestId: error.requestId, messageKey: error.messageKey }
+              : {}),
+          });
+        }
       });
     return () => {
       active = false;
       csrfToken.current = null;
     };
-  }, []);
+  }, [authErrorRoute]);
 
   const getCsrfToken = useCallback(async (): Promise<string> => {
     if (csrfToken.current !== null) return csrfToken.current;
@@ -85,17 +119,27 @@ export function App() {
       </header>
 
       <div className="content">
-        {state.kind === "loading" && <LoadingState />}
-        {state.kind === "error" && <ErrorState message={state.message} />}
-        {state.kind === "visitor" && <VisitorState />}
-        {state.kind === "authenticated" && state.user.status === "pending" && (
-          <AccountState
-            title="Your account is pending approval"
-            message="An Oloka Video administrator must approve this closed-beta account before product access is available."
-            onLogout={logout}
+        {authErrorRoute && <AuthErrorState />}
+        {!authErrorRoute && state.kind === "loading" && <LoadingState />}
+        {!authErrorRoute && state.kind === "error" && (
+          <ErrorState
+            message={state.message}
+            requestId={state.requestId}
+            messageKey={state.messageKey}
           />
         )}
-        {state.kind === "authenticated" &&
+        {!authErrorRoute && state.kind === "visitor" && <VisitorState />}
+        {!authErrorRoute &&
+          state.kind === "authenticated" &&
+          state.user.status === "pending" && (
+            <AccountState
+              title="Your account is pending approval"
+              message="An Oloka Video administrator must approve this closed-beta account before product access is available."
+              onLogout={logout}
+            />
+          )}
+        {!authErrorRoute &&
+          state.kind === "authenticated" &&
           (state.user.status === "disabled" ||
             state.user.status === "rejected") && (
             <AccountState
@@ -108,13 +152,15 @@ export function App() {
               onLogout={logout}
             />
           )}
-        {state.kind === "authenticated" && state.user.status === "active" && (
-          <ActiveState
-            user={state.user}
-            getCsrfToken={getCsrfToken}
-            onLogout={logout}
-          />
-        )}
+        {!authErrorRoute &&
+          state.kind === "authenticated" &&
+          state.user.status === "active" && (
+            <ActiveState
+              user={state.user}
+              getCsrfToken={getCsrfToken}
+              onLogout={logout}
+            />
+          )}
       </div>
 
       <footer>
@@ -141,13 +187,43 @@ function LoadingState() {
   );
 }
 
-function ErrorState({ message }: { message: string }) {
+function ErrorState(props: {
+  message: string;
+  requestId?: string;
+  messageKey?: string;
+}) {
   return (
     <Surface className="state-panel error-panel" role="alert">
       <span className="state-symbol">!</span>
       <div>
         <strong>Connection error</strong>
-        <p>{message}</p>
+        <p>{props.message}</p>
+        {props.requestId !== undefined && (
+          <small>
+            Support reference: {props.requestId} ({props.messageKey})
+          </small>
+        )}
+      </div>
+    </Surface>
+  );
+}
+
+function AuthErrorState() {
+  return (
+    <Surface className="account-panel" role="alert">
+      <p className="eyebrow">Sign-in status</p>
+      <h1>Google sign-in did not complete</h1>
+      <p className="hero-copy">
+        The sign-in attempt could not be completed safely. No provider details
+        are shown here. Please start a new attempt.
+      </p>
+      <div className="card-heading">
+        <a className="primary-action" href="/api/v1/auth/google/start">
+          Try again
+        </a>
+        <a className="secondary-action" href="/">
+          Return home
+        </a>
       </div>
     </Surface>
   );

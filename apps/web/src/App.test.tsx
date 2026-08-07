@@ -7,11 +7,46 @@ describe("App", () => {
     vi.restoreAllMocks();
     localStorage.clear();
     sessionStorage.clear();
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("renders a fixed generic auth error without exposing callback query text", () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    window.history.replaceState(
+      {},
+      "",
+      "/auth/error?error_description=sensitive&code=secret&state=opaque",
+    );
+
+    render(<App />);
+
+    expect(
+      screen.getByText("Google sign-in did not complete"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Try again" })).toHaveAttribute(
+      "href",
+      "/api/v1/auth/google/start",
+    );
+    expect(
+      screen.queryByText(/sensitive|secret|opaque/i),
+    ).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("renders the closed-beta Google entry for a visitor", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ authenticated: false })),
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "AUTHENTICATION_REQUIRED",
+            retryable: true,
+            messageKey: "error.auth.required",
+            suggestedAction: "Sign in again with Google",
+            requestId: "request-visitor",
+          },
+        }),
+        { status: 401 },
+      ),
     );
 
     render(<App />);
@@ -32,6 +67,31 @@ describe("App", () => {
 
     expect(await screen.findByText("Connection error")).toBeInTheDocument();
     expect(screen.getByText("Network unavailable")).toBeInTheDocument();
+  });
+
+  it("renders canonical API guidance and request ID without legacy message fields", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "INTERNAL_ERROR",
+            retryable: true,
+            messageKey: "error.internal",
+            suggestedAction: "Retry later and provide the request ID",
+            requestId: "request-support-123",
+          },
+        }),
+        { status: 500 },
+      ),
+    );
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("Retry later and provide the request ID"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/request-support-123/)).toBeInTheDocument();
+    expect(screen.getByText(/error\.internal/)).toBeInTheDocument();
   });
 
   it("renders the pending state without product navigation", async () => {
