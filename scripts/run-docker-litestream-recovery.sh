@@ -17,6 +17,7 @@ mc_image="quay.io/minio/mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b
 access_key="minio-ci-access"
 secret_key="minio-ci-secret-value"
 application_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+google_client_secret="docker-recovery-google-client-secret"
 containers=()
 volumes=("$minio_volume" "$object_volume")
 
@@ -89,6 +90,11 @@ start_boot() {
     -e HF_S3_ACCESS_KEY_ID="$access_key" \
     -e HF_S3_SECRET_ACCESS_KEY="$secret_key" \
     -e OLOKA_APP_KEY="$application_key" \
+    -e OLOKA_GOOGLE_OIDC_ISSUER="https://accounts.google.com" \
+    -e OLOKA_GOOGLE_CLIENT_ID="docker-recovery-client" \
+    -e OLOKA_GOOGLE_CLIENT_SECRET="$google_client_secret" \
+    -e OLOKA_PUBLIC_ORIGIN="https://oloka-recovery.example" \
+    -e OLOKA_BOOTSTRAP_ADMIN_EMAIL="admin@oloka-recovery.example" \
     -e HF_S3_ENDPOINT="http://$minio_container:9000" \
     -e HF_S3_REGION=us-east-1 \
     -e HF_S3_BUCKET="$bucket" \
@@ -123,11 +129,145 @@ stop_boot() {
   grep -q 'graceful shutdown started' <<<"$logs"
   if grep -Fq "$access_key" <<<"$logs" || \
      grep -Fq "$secret_key" <<<"$logs" || \
-     grep -Fq "$application_key" <<<"$logs"; then
+     grep -Fq "$application_key" <<<"$logs" || \
+     grep -Fq "$google_client_secret" <<<"$logs"; then
     echo "A test credential leaked into container logs" >&2
     return 1
   fi
   echo "boot_container=$container shutdown_seconds=$elapsed secret_scan=pass"
+}
+
+prepare_v2_database() {
+  local local_volume="$1"
+  docker run --rm --entrypoint node \
+    -v "$local_volume:/var/lib/oloka" "$image" --input-type=module -e '
+      import { mkdirSync, readFileSync } from "node:fs";
+      import { createHash } from "node:crypto";
+      import { DatabaseSync } from "node:sqlite";
+      mkdirSync("/var/lib/oloka/database", { recursive: true });
+      const path = "/var/lib/oloka/database/oloka.db";
+      const database = new DatabaseSync(path);
+      const v1 = readFileSync("/app/apps/server/migrations/0001-foundation-system-tables.sql");
+      const v2 = readFileSync("/app/apps/server/migrations/0002-persistence-kernel.sql");
+      database.exec(v1.toString("utf8"));
+      database.exec(v2.toString("utf8"));
+      database.prepare(`INSERT INTO schema_migrations
+        (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+        VALUES (2, ?, ?, 2, 0, ?)`).run(
+          "persistence-kernel",
+          createHash("sha256").update(v2).digest("hex"),
+          "slice-3a1-docker-fixture",
+        );
+      database.close();
+    '
+}
+
+seed_identity_state() {
+  local container="$1"
+  docker exec "$container" node --input-type=module -e '
+    import { DatabaseSync } from "node:sqlite";
+    const database = new DatabaseSync("/var/lib/oloka/database/oloka.db");
+    const now = Date.now();
+    const adminId = "00000000-0000-4000-8000-000000000101";
+    const memberId = "00000000-0000-4000-8000-000000000102";
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.prepare(`INSERT INTO users
+        (id, email_normalized, display_name, role, status, approved_at,
+         created_at, updated_at, last_login_at, version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
+          adminId, "admin@oloka-recovery.example", "Recovery Admin",
+          "admin", "active",
+          now, now, now, now,
+        );
+      database.prepare(`INSERT INTO users
+        (id, email_normalized, display_name, role, status,
+         created_at, updated_at, last_login_at, version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
+          memberId, "member@oloka-recovery.example", "Recovery Member",
+          "member", "pending",
+          now, now, now,
+        );
+      const identity = database.prepare(`INSERT INTO oauth_identities
+        (id, user_id, issuer, subject, email_at_link, email_verified,
+         profile_json, created_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`);
+      identity.run("00000000-0000-4000-8000-000000000111", adminId,
+        "https://accounts.google.com", "recovery-admin-subject",
+        "admin@oloka-recovery.example", "{}", now, now);
+      identity.run("00000000-0000-4000-8000-000000000112", memberId,
+        "https://accounts.google.com", "recovery-member-subject",
+        "member@oloka-recovery.example", "{}", now, now);
+      const session = database.prepare(`INSERT INTO sessions
+        (id, user_id, token_hash_sha256, csrf_token_hash_sha256, status,
+         created_at, last_seen_at, idle_expires_at, expires_at,
+         user_agent_summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      session.run("00000000-0000-4000-8000-000000000121", adminId,
+        Buffer.alloc(32, 21), Buffer.alloc(32, 22), "active", now, now,
+        now + 604800000, now + 2592000000, "Chrome; Linux; desktop");
+      session.run("00000000-0000-4000-8000-000000000122", memberId,
+        Buffer.alloc(32, 23), Buffer.alloc(32, 24), "active", now, now,
+        now + 604800000, now + 2592000000, "Chrome; Linux; desktop");
+      database.prepare(`INSERT INTO audit_events
+        (id, sequence, actor_type, action, resource_type, resource_id,
+         outcome, metadata_json, created_at)
+        VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`).run(
+          "00000000-0000-4000-8000-000000000131", "system",
+          "admin.bootstrap", "user", adminId, "success",
+          "{\"provider\":\"google\"}", now);
+      database.exec("COMMIT");
+      database.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    } catch (error) {
+      if (database.isTransaction) database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      database.close();
+    }
+  '
+}
+
+transition_member_state() {
+  local container="$1"
+  docker exec "$container" node --input-type=module -e '
+    import { randomUUID } from "node:crypto";
+    import { pathToFileURL } from "node:url";
+    import { SqliteSystemDatabase } from "/app/apps/server/dist/database/sqlite-system-database.js";
+    import { AdminUserService } from "/app/apps/server/dist/identity/admin-user-service.js";
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL("/var/lib/oloka/database/oloka.db").href,
+    );
+    await database.migrate();
+    try {
+      new AdminUserService(
+        database.transactions,
+        { now: () => Date.now() },
+        { generate: () => randomUUID() },
+      ).transition(
+        {
+          sessionId: "00000000-0000-4000-8000-000000000121",
+          user: {
+            id: "00000000-0000-4000-8000-000000000101",
+            email: "admin@oloka-recovery.example",
+            displayName: "Recovery Admin",
+            avatarUrl: null,
+            role: "admin",
+            status: "active",
+            version: 1,
+          },
+        },
+        "00000000-0000-4000-8000-000000000102",
+        {
+          status: "active",
+          version: 1,
+          reason: "Docker restart persistence qualification",
+        },
+        "docker-recovery-approve-member",
+      );
+    } finally {
+      await database.close();
+    }
+  '
 }
 
 inspect_database() {
@@ -143,8 +283,11 @@ inspect_database() {
       const coreTables = tables.filter(name => !name.startsWith("_litestream_"));
       const litestreamTables = tables.filter(name => name.startsWith("_litestream_"));
       const metadata = db.prepare("SELECT value_json, version FROM system_metadata WHERE key = ?").get("deployment.runtime");
+      const users = db.prepare("SELECT id, role, status, version FROM users ORDER BY id").all();
+      const identities = db.prepare("SELECT id, user_id, issuer, email_verified FROM oauth_identities ORDER BY id").all();
+      const sessions = db.prepare("SELECT id, user_id, status, revoke_reason FROM sessions ORDER BY id").all();
       db.close();
-      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, metadataVersion: metadata.version, witness: JSON.parse(metadata.value_json) }));
+      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, users, identities, sessions, metadataVersion: metadata.version, witness: JSON.parse(metadata.value_json) }));
     '
 }
 
@@ -168,6 +311,11 @@ missing_output="$(docker run --rm --network "$network" \
   -e HF_S3_ACCESS_KEY_ID="$access_key" \
   -e HF_S3_SECRET_ACCESS_KEY="$secret_key" \
   -e OLOKA_APP_KEY="$application_key" \
+  -e OLOKA_GOOGLE_OIDC_ISSUER="https://accounts.google.com" \
+  -e OLOKA_GOOGLE_CLIENT_ID="docker-recovery-client" \
+  -e OLOKA_GOOGLE_CLIENT_SECRET="$google_client_secret" \
+  -e OLOKA_PUBLIC_ORIGIN="https://oloka-recovery.example" \
+  -e OLOKA_BOOTSTRAP_ADMIN_EMAIL="admin@oloka-recovery.example" \
   -e HF_S3_ENDPOINT="http://$minio_container:9000" \
   -e HF_S3_BUCKET="$bucket" \
   -e HF_S3_SQLITE_PREFIX="$prefix" \
@@ -189,7 +337,10 @@ for boot in 1 2 3; do
   docker volume create "$local_volume" >/dev/null
   mode="restore-required"
   if [ "$boot" -eq 1 ]; then mode="fresh-if-replica-missing"; fi
+  if [ "$boot" -eq 1 ]; then prepare_v2_database "$local_volume"; fi
   container="$(start_boot "$boot" "$mode" "$local_volume")"
+  if [ "$boot" -eq 1 ]; then seed_identity_state "$container"; fi
+  if [ "$boot" -eq 2 ]; then transition_member_state "$container"; fi
   wait_for_replica
   stop_boot "$container"
   evidence="$(inspect_database "$local_volume")"
@@ -200,14 +351,21 @@ for boot in 1 2 3; do
   test "$startup_count" = "$boot"
   docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e '
     const d=JSON.parse(require("fs").readFileSync(0,"utf8"));
-    const expectedTables=["audit_events","idempotency_records","outbox_events","schema_migrations","system_metadata","users"];
+    const boot=Number(process.argv[1]);
+    const expectedTables=["audit_events","idempotency_records","oauth_identities","oauth_transactions","outbox_events","provider_credential_references","schema_migrations","sessions","system_metadata","users"];
+    const expectedMemberStatus=boot === 1 ? "pending" : "active";
+    const expectedMemberSession=boot === 1 ? "active" : "revoked";
     const valid=d.metadataVersion === d.witness.startupCount && d.quickCheck === "ok" && d.foreignKeyFailures === 0 &&
-      JSON.stringify(d.ledger.map(row=>row.version)) === JSON.stringify([1,2]) &&
-      JSON.stringify(d.ledger.map(row=>row.name)) === JSON.stringify(["foundation_system_tables","persistence-kernel"]) &&
+      JSON.stringify(d.ledger.map(row=>row.version)) === JSON.stringify([1,2,3]) &&
+      JSON.stringify(d.ledger.map(row=>row.name)) === JSON.stringify(["foundation_system_tables","persistence-kernel","identity-and-approval"]) &&
       JSON.stringify(d.coreTables) === JSON.stringify(expectedTables) &&
-      JSON.stringify(d.litestreamTables) === JSON.stringify(["_litestream_lock","_litestream_seq"]);
+      JSON.stringify(d.litestreamTables) === JSON.stringify(["_litestream_lock","_litestream_seq"]) &&
+      d.identities.length === 2 && d.users.length === 2 && d.sessions.length === 2 &&
+      d.users[0].role === "admin" && d.users[0].status === "active" &&
+      d.users[1].status === expectedMemberStatus &&
+      d.sessions[1].status === expectedMemberSession;
     if (!valid) process.exit(1);
-  ' <<<"$evidence"
+  ' "$boot" <<<"$evidence"
   if [ "$boot" -eq 1 ]; then
     first_started_at="$current_first_started_at"
     ledger_json="$current_ledger"
@@ -215,13 +373,28 @@ for boot in 1 2 3; do
     test "$current_first_started_at" = "$first_started_at"
     test "$current_ledger" = "$ledger_json"
   fi
-  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2 quick_check=ok foreign_keys=0"
+  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3 identity_persistence=pass quick_check=ok foreign_keys=0"
   docker rm "$container" >/dev/null
   docker volume rm "$local_volume" >/dev/null
 done
 
-docker run --rm --entrypoint sh -v "$object_volume:/data" "$image" -c \
-  'test ! -d /data/backups/pre-migration'
+docker run --rm --entrypoint node -v "$object_volume:/data" "$image" --input-type=module -e '
+  import { readdir } from "node:fs/promises";
+  import { join } from "node:path";
+  import { verifyBackupDirectory } from "/app/apps/server/dist/database/pre-migration-backup.js";
+  const root = "/data/backups/pre-migration";
+  const entries = await readdir(root);
+  if (entries.length !== 1) process.exit(1);
+  const manifest = await verifyBackupDirectory(
+    join(root, entries[0]),
+    Buffer.from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "base64url"),
+  );
+  if (manifest.sourceSchemaVersion !== 2 || manifest.targetSchemaVersion !== 3 ||
+      JSON.stringify(manifest.migrationVersionsPending) !== JSON.stringify([3])) {
+    process.exit(1);
+  }
+  process.stdout.write("verified_pre_migration_backup=v2-to-v3\n");
+'
 remaining_replica_objects="$(mc "ls --recursive ci/$bucket/$prefix | wc -l" | tr -d '[:space:]')"
 test "$remaining_replica_objects" -gt 0
-echo "replica_objects=$remaining_replica_objects no_pending_migration_backup=pass recovery_test=pass"
+echo "replica_objects=$remaining_replica_objects single_verified_v3_backup=pass recovery_test=pass"

@@ -1,6 +1,6 @@
 # Phase 3 Implementation Sequence
 
-Status: Slice 3A implemented; Slice 3A.1 durability implementation is under review and production cutover is pending. Later slices require explicit authorization.
+Status: Slice 3A.1 durability is merged and its controlled production cutover is closed. Slice 3B is implemented on its isolated review branch and remains undeployed pending review. Later slices require explicit authorization.
 
 ## 3A — Persistence kernel
 
@@ -19,11 +19,14 @@ Implementation status: complete in Phase 3A. See
   consistent backup/restore on the pinned runtime.
 - Deployment smoke: exact validated HF SHA, schema/readiness metadata, DB/storage restart persistence, no product route added.
 - Durability correction: local primary outside `/data`, Litestream 0.5.11 to HF S3, explicit restore policy, startup witness, and pinned-MinIO three-boot recovery. This does not authorize production cutover or Slice 3B.
+- Production closure: PR #2 merged as `f81680443de94cdbd778f9e30e47e2d2392c100b`; the controlled cutover verified that runtime SHA, readiness, restore-required startup, a three-start persistence witness, and the isolated `sqlite-replica/dev` Litestream chain. No v1/v2 bytes changed during cutover.
 - Rollback: stop app, restore verified pre-v2 snapshot, deploy Phase 2 foundation build; no down migration.
 - Explicitly excluded: Google/auth, Project, Asset/upload, dispatcher Jobs, providers, composition, preview, render, UI.
 - Exit criteria: repository/application boundaries are enforced; no route SQL; v1->v2 and restore drill pass; outbox/audit primitives have deterministic tests. Only this slice may start after Phase 2 approval.
 
 ## 3B — Identity and approval
+
+Implementation status: complete on `codex/phase3b-identity-approval` for review; not deployed or merged. See `PHASE3B_IDENTITY_APPROVAL.md`.
 
 - Modules/files: Google OIDC adapter, AEAD OAuth transaction store,
   user/identity/session repositories, HKDF-separated cookie/CSRF/cursor keys,
