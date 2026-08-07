@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("database migrations", () => {
-  it("creates exactly the Slice 3A tables on a fresh database", async () => {
+  it("preserves Slice 3A tables and adds only the Slice 3B tables", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const database = await SqliteSystemDatabase.connect(
@@ -34,8 +34,12 @@ describe("database migrations", () => {
     expect(database.listApplicationTables()).toEqual([
       "audit_events",
       "idempotency_records",
+      "oauth_identities",
+      "oauth_transactions",
       "outbox_events",
+      "provider_credential_references",
       "schema_migrations",
+      "sessions",
       "system_metadata",
       "users",
     ]);
@@ -48,7 +52,7 @@ describe("database migrations", () => {
           )
           .all(),
     ) as Array<Record<string, unknown>>;
-    expect(ledger).toHaveLength(2);
+    expect(ledger).toHaveLength(3);
     expect(ledger[0]).toMatchObject({
       version: 1,
       name: "foundation_system_tables",
@@ -68,6 +72,44 @@ describe("database migrations", () => {
         ),
       ),
     });
+    expect(ledger[2]).toMatchObject({
+      version: 3,
+      name: "identity-and-approval",
+      checksum_sha256: sha256Hex(
+        await readFile(
+          new URL(
+            "../../migrations/0003-identity-and-approval.sql",
+            import.meta.url,
+          ),
+        ),
+      ),
+    });
+    await database.close();
+  });
+
+  it("applies identity and approval migration v3 on a fresh database", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
+    temporaryDirectories.push(directory);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(join(directory, "database.sqlite")).href,
+    );
+
+    await database.migrate();
+
+    const ledger = database.transactions.run(
+      "read",
+      ({ database: connection }) =>
+        connection
+          .prepare(
+            "SELECT version, name FROM schema_migrations ORDER BY version",
+          )
+          .all(),
+    );
+    expect(ledger).toEqual([
+      { version: 1, name: "foundation_system_tables" },
+      { version: 2, name: "persistence-kernel" },
+      { version: 3, name: "identity-and-approval" },
+    ]);
     await database.close();
   });
 
@@ -144,8 +186,8 @@ describe("database migrations", () => {
     );
     expect(manifest).toMatchObject({
       sourceSchemaVersion: 1,
-      targetSchemaVersion: 2,
-      migrationVersionsPending: [2],
+      targetSchemaVersion: 3,
+      migrationVersionsPending: [2, 3],
       appBuildSha: "test-build",
     });
     await expect(
@@ -186,6 +228,64 @@ describe("database migrations", () => {
           .all(),
     );
     expect(after).toEqual(before);
+    await database.close();
+  });
+
+  it("creates one verified v2-to-v3 backup and no new backup on restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "database.sqlite");
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(
+      await readFile(
+        new URL(
+          "../../migrations/0001-foundation-system-tables.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const v2Bytes = await readFile(
+      new URL("../../migrations/0002-persistence-kernel.sql", import.meta.url),
+    );
+    legacy.exec(v2Bytes.toString("utf8"));
+    legacy
+      .prepare(
+        `INSERT INTO schema_migrations
+          (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+         VALUES (2, 'persistence-kernel', ?, 2, 0, 'slice-3a1')`,
+      )
+      .run(sha256Hex(v2Bytes));
+    legacy.close();
+    const backupRoot = join(directory, "backups");
+    let id = 0;
+    const applicationKey = Buffer.alloc(32, 5);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(databasePath).href,
+      {
+        appKey: applicationKey,
+        backupRoot,
+        appBuildSha: "slice-3b",
+        idGenerator: { generate: () => `backup-v3-${++id}` },
+      },
+    );
+
+    await database.migrate();
+
+    await expect(
+      verifyBackupDirectory(
+        join(backupRoot, "pre-migration", "backup-v3-1"),
+        applicationKey,
+      ),
+    ).resolves.toMatchObject({
+      sourceSchemaVersion: 2,
+      targetSchemaVersion: 3,
+      migrationVersionsPending: [3],
+    });
+    await database.migrate();
+    expect(await readdir(join(backupRoot, "pre-migration"))).toEqual([
+      "backup-v3-1",
+    ]);
     await database.close();
   });
 

@@ -147,17 +147,21 @@ export class SqliteSystemDatabase implements SystemDatabase {
       const tables = this.listApplicationTables();
       const isFreshDatabase = tables.length === 0;
       if (isFreshDatabase) this.applyFoundationMigration(migrations[0]);
-      this.assertKnownSchemaBeforeMigration();
+      this.assertKnownSchemaBeforeMigration(migrations);
 
-      const currentVersion = this.currentSchemaVersion();
+      let currentVersion = this.currentSchemaVersion();
       if (currentVersion > migrations.length) {
         throw new Error("Database schema is newer than this application build");
       }
+      if (!isFreshDatabase && currentVersion < migrations.length) {
+        await this.createPendingMigrationBackup(currentVersion, migrations);
+      }
       if (currentVersion === 1) {
-        await this.applyPersistenceKernelMigration(
-          migrations[1],
-          !isFreshDatabase,
-        );
+        this.applyPersistenceKernelMigration(migrations[1]);
+        currentVersion = 2;
+      }
+      if (currentVersion === 2) {
+        this.applyIdentityAndApprovalMigration(migrations[2]);
       }
       this.verifyAppliedMigrations(migrations);
       this.migrationFailure = undefined;
@@ -252,7 +256,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
     );
   }
 
-  private assertKnownSchemaBeforeMigration(): void {
+  private assertKnownSchemaBeforeMigration(migrations: MigrationAsset[]): void {
     const tables = this.listApplicationTables();
     if (!tables.includes("schema_migrations")) {
       throw new Error("Unrecognized database without a migration ledger");
@@ -274,6 +278,64 @@ export class SqliteSystemDatabase implements SystemDatabase {
         throw new Error("Foundation v1 migration identity is invalid");
       }
       this.assertExactFoundationColumns();
+      return;
+    }
+    if (version === 2 || version === 3) {
+      const expectedTables =
+        version === 2
+          ? [
+              "audit_events",
+              "idempotency_records",
+              "outbox_events",
+              "schema_migrations",
+              "system_metadata",
+              "users",
+            ]
+          : [
+              "audit_events",
+              "idempotency_records",
+              "oauth_identities",
+              "oauth_transactions",
+              "outbox_events",
+              "provider_credential_references",
+              "schema_migrations",
+              "sessions",
+              "system_metadata",
+              "users",
+            ];
+      const applicationTables = tables.filter(
+        (table) => !table.startsWith("_litestream_"),
+      );
+      if (
+        JSON.stringify(applicationTables) !== JSON.stringify(expectedTables)
+      ) {
+        throw new Error(
+          `Schema v${version} contains unknown application tables`,
+        );
+      }
+      const rows = this.database
+        .prepare(
+          "SELECT version, name, checksum_sha256 FROM schema_migrations ORDER BY version",
+        )
+        .all() as Array<{
+        version: number;
+        name: string;
+        checksum_sha256: string;
+      }>;
+      if (
+        rows.length !== version ||
+        rows.some((row, index) => {
+          const migration = migrations[index];
+          return (
+            migration === undefined ||
+            row.version !== migration.version ||
+            row.name !== migration.name ||
+            row.checksum_sha256 !== migration.checksum
+          );
+        })
+      ) {
+        throw new Error(`Schema v${version} migration identity is invalid`);
+      }
     }
   }
 
@@ -314,36 +376,66 @@ export class SqliteSystemDatabase implements SystemDatabase {
     return row.version ?? 0;
   }
 
-  private async applyPersistenceKernelMigration(
-    migration: MigrationAsset | undefined,
-    backupRequired: boolean,
+  private async createPendingMigrationBackup(
+    currentVersion: number,
+    migrations: MigrationAsset[],
   ): Promise<void> {
-    if (migration?.version !== 2)
-      throw new Error("Persistence migration is missing");
-    if (backupRequired && this.appKey === undefined) {
+    if (this.appKey === undefined) {
       throw new Error(
         "An application key is required for pre-migration backup",
       );
     }
-    if (backupRequired && this.appKey !== undefined) {
-      await createPreMigrationBackup({
-        database: this.database,
-        backupRoot: this.backupRoot,
-        applicationKey: this.appKey,
-        appBuildSha: this.appBuildSha,
-        clock: this.clock,
-        idGenerator: this.idGenerator,
-        sourceSchemaVersion: 1,
-        targetSchemaVersion: 2,
-        migrationVersionsPending: [2],
-      });
-    }
+    await createPreMigrationBackup({
+      database: this.database,
+      backupRoot: this.backupRoot,
+      applicationKey: this.appKey,
+      appBuildSha: this.appBuildSha,
+      clock: this.clock,
+      idGenerator: this.idGenerator,
+      sourceSchemaVersion: currentVersion,
+      targetSchemaVersion: migrations.length,
+      migrationVersionsPending: migrations
+        .filter(({ version }) => version > currentVersion)
+        .map(({ version }) => version),
+    });
+  }
+
+  private applyPersistenceKernelMigration(
+    migration: MigrationAsset | undefined,
+  ): void {
+    if (migration?.version !== 2)
+      throw new Error("Persistence migration is missing");
     const metadataCount = this.database
       .prepare("SELECT COUNT(*) AS count FROM system_metadata")
       .get() as { count: number };
     if (metadataCount.count !== 0) {
       throw new Error("Legacy system metadata cannot be safely normalized");
     }
+    const startedAt = this.clock.now();
+    this.transactions.run("immediate", ({ database }) => {
+      database.exec(migration.sql);
+      database
+        .prepare(
+          `INSERT INTO schema_migrations
+            (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          migration.version,
+          migration.name,
+          migration.checksum,
+          this.clock.now(),
+          Math.max(0, this.clock.now() - startedAt),
+          this.appBuildSha,
+        );
+    });
+  }
+
+  private applyIdentityAndApprovalMigration(
+    migration: MigrationAsset | undefined,
+  ): void {
+    if (migration?.version !== 3)
+      throw new Error("Identity and approval migration is missing");
     const startedAt = this.clock.now();
     this.transactions.run("immediate", ({ database }) => {
       database.exec(migration.sql);
@@ -408,6 +500,7 @@ async function loadMigrationAssets(): Promise<MigrationAsset[]> {
   const definitions = [
     [1, "foundation_system_tables", "0001-foundation-system-tables.sql"],
     [2, "persistence-kernel", "0002-persistence-kernel.sql"],
+    [3, "identity-and-approval", "0003-identity-and-approval.sql"],
   ] as const;
   return Promise.all(
     definitions.map(async ([version, name, filename]) => {

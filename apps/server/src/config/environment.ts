@@ -34,9 +34,55 @@ const environmentSchema = z
       .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
       .default("info"),
     OLOKA_APP_KEY: z.string().optional(),
+    OLOKA_GOOGLE_OIDC_ISSUER: z.url().optional(),
+    OLOKA_GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+    OLOKA_GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+    OLOKA_PUBLIC_ORIGIN: z.url().optional(),
+    OLOKA_BOOTSTRAP_ADMIN_EMAIL: z.email().optional(),
+    OLOKA_SESSION_IDLE_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(300)
+      .max(7 * 24 * 60 * 60)
+      .default(7 * 24 * 60 * 60),
+    OLOKA_SESSION_ABSOLUTE_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(3600)
+      .max(30 * 24 * 60 * 60)
+      .default(30 * 24 * 60 * 60),
+    OLOKA_OAUTH_TRANSACTION_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(60)
+      .max(15 * 60)
+      .default(10 * 60),
   })
   .superRefine((environment, context) => {
+    if (
+      environment.OLOKA_SESSION_ABSOLUTE_TTL_SECONDS <
+      environment.OLOKA_SESSION_IDLE_TTL_SECONDS
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["OLOKA_SESSION_ABSOLUTE_TTL_SECONDS"],
+        message: "absolute session TTL must not be shorter than idle TTL",
+      });
+    }
     if (environment.NODE_ENV !== "production") return;
+    for (const key of [
+      "OLOKA_GOOGLE_OIDC_ISSUER",
+      "OLOKA_PUBLIC_ORIGIN",
+    ] as const) {
+      const value = environment[key];
+      if (value !== undefined && new URL(value).protocol !== "https:") {
+        context.addIssue({
+          code: "custom",
+          path: [key],
+          message: `${key} must use HTTPS in production`,
+        });
+      }
+    }
     if (environment.DATABASE_PATH !== "/var/lib/oloka/database/oloka.db") {
       context.addIssue({
         code: "custom",
@@ -65,6 +111,11 @@ const environmentSchema = z
       "HF_S3_ACCESS_KEY_ID",
       "HF_S3_SECRET_ACCESS_KEY",
       "OLOKA_APP_KEY",
+      "OLOKA_GOOGLE_OIDC_ISSUER",
+      "OLOKA_GOOGLE_CLIENT_ID",
+      "OLOKA_GOOGLE_CLIENT_SECRET",
+      "OLOKA_PUBLIC_ORIGIN",
+      "OLOKA_BOOTSTRAP_ADMIN_EMAIL",
     ] as const) {
       if (environment[key] === undefined) {
         context.addIssue({
@@ -95,6 +146,16 @@ export interface AppEnvironment {
   buildTimestamp: string;
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   appKey?: Uint8Array;
+  identity?: {
+    googleIssuer: string;
+    googleClientId: string;
+    googleClientSecret: string;
+    publicOrigin: string;
+    bootstrapAdminEmail: string;
+    sessionIdleTtlMs: number;
+    sessionAbsoluteTtlMs: number;
+    oauthTransactionTtlMs: number;
+  };
 }
 
 export function parseEnvironment(input: NodeJS.ProcessEnv): AppEnvironment {
@@ -120,5 +181,34 @@ export function parseEnvironment(input: NodeJS.ProcessEnv): AppEnvironment {
     ...(parsed.OLOKA_APP_KEY === undefined
       ? {}
       : { appKey: decodeApplicationKey(parsed.OLOKA_APP_KEY) }),
+    ...(parsed.OLOKA_GOOGLE_OIDC_ISSUER === undefined ||
+    parsed.OLOKA_GOOGLE_CLIENT_ID === undefined ||
+    parsed.OLOKA_GOOGLE_CLIENT_SECRET === undefined ||
+    parsed.OLOKA_PUBLIC_ORIGIN === undefined ||
+    parsed.OLOKA_BOOTSTRAP_ADMIN_EMAIL === undefined
+      ? {}
+      : {
+          identity: {
+            googleIssuer: parsed.OLOKA_GOOGLE_OIDC_ISSUER,
+            googleClientId: parsed.OLOKA_GOOGLE_CLIENT_ID,
+            googleClientSecret: parsed.OLOKA_GOOGLE_CLIENT_SECRET,
+            publicOrigin: normalizeOrigin(parsed.OLOKA_PUBLIC_ORIGIN),
+            bootstrapAdminEmail:
+              parsed.OLOKA_BOOTSTRAP_ADMIN_EMAIL.trim().toLowerCase(),
+            sessionIdleTtlMs: parsed.OLOKA_SESSION_IDLE_TTL_SECONDS * 1000,
+            sessionAbsoluteTtlMs:
+              parsed.OLOKA_SESSION_ABSOLUTE_TTL_SECONDS * 1000,
+            oauthTransactionTtlMs:
+              parsed.OLOKA_OAUTH_TRANSACTION_TTL_SECONDS * 1000,
+          },
+        }),
   };
+}
+
+function normalizeOrigin(value: string): string {
+  const url = new URL(value);
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("OLOKA_PUBLIC_ORIGIN must be an origin URL");
+  }
+  return url.origin;
 }

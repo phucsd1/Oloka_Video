@@ -87,4 +87,31 @@ describe("parseEnvironment", () => {
       }),
     ).toThrow(/HF_S3_SQLITE_PREFIX/);
   });
+
+  it("requires the complete Google identity configuration in production without echoing secrets", () => {
+    const clientSecret = "production-google-client-secret";
+    expect(() =>
+      parseEnvironment({
+        NODE_ENV: "production",
+        OLOKA_DATABASE_BOOTSTRAP_MODE: "restore-required",
+        HF_S3_ACCESS_KEY_ID: "access-key-name",
+        HF_S3_SECRET_ACCESS_KEY: "secret-key-value",
+        OLOKA_APP_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        OLOKA_GOOGLE_CLIENT_SECRET: clientSecret,
+      }),
+    ).toThrow(/OLOKA_GOOGLE_OIDC_ISSUER/);
+
+    try {
+      parseEnvironment({
+        NODE_ENV: "production",
+        OLOKA_DATABASE_BOOTSTRAP_MODE: "restore-required",
+        HF_S3_ACCESS_KEY_ID: "access-key-name",
+        HF_S3_SECRET_ACCESS_KEY: "secret-key-value",
+        OLOKA_APP_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        OLOKA_GOOGLE_CLIENT_SECRET: clientSecret,
+      });
+    } catch (error) {
+      expect(String(error)).not.toContain(clientSecret);
+    }
+  });
 });
