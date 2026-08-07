@@ -10,6 +10,14 @@ preview, render, or Slice 3C behavior. The slice is review-only: it does not
 deploy, change Hugging Face configuration values, run a production migration,
 or restart production.
 
+Phase 3B.1 closes the pre-cutover contract gaps without changing migration v3:
+the public error catalog/envelope has one typed Fastify authority; callback
+failures redirect only to `/auth/error`; provider denial consumes one-use
+state; unauthenticated session bootstrap is canonical 401; the admin list uses
+a version-1 filter-bound HMAC cursor with 25/100 pagination; Idempotency-Key is
+strict 1-128 safe ASCII; and coarse address metadata uses HMAC-SHA256.
+Production cutover remains pending separate authorization.
+
 ## Migration v3
 
 `0003-identity-and-approval.sql` adds exactly four application tables:
@@ -52,7 +60,7 @@ The `__Host-oloka_session` cookie is Secure, HttpOnly, host-only, Path `/`, and
 SameSite Lax. It carries 32 random base64url bytes; only SHA-256 is persisted.
 Idle and absolute expiry default to seven and thirty days, and `last_seen_at`
 is coalesced to five-minute updates. Stored network metadata is only a
-dedicated-key hash of an IPv4 /24 or IPv6 /48 prefix plus a 200-character,
+dedicated-key HMAC-SHA256 of an IPv4 /24 or IPv6 /48 prefix plus a 200-character,
 control-free user-agent summary. Session, CSRF, and IP hashes are absent from
 read APIs.
 
@@ -71,7 +79,9 @@ admin User row has ever existed. The User, identity, active session,
 `admin.bootstrap`, and login audit are committed through guarded database
 transactions before the cookie is emitted.
 
-Admin listing returns a bounded safe projection. Status/role transitions
+Admin listing returns a bounded safe projection in `(created_at,id)` order with
+an authenticated version-1 cursor bound to normalized status/search filters;
+the default/max limits are 25/100. Status/role transitions
 require an active admin, `Idempotency-Key`, optimistic User version, allowed
 state transition, CSRF, atomic audit, and target-session revocation. The
 last-active-admin predicate and mutation share one immediate transaction.
@@ -89,4 +99,6 @@ secret and variable names without reading or printing values. Auth/admin
 responses use `no-store`, stable safe error envelopes, security headers, and no
 broad CORS policy. In-memory start/callback-failure/CSRF-failure limits are
 bounded and keyed by privacy-safe coarse IP hashes; they are explicitly
-single-instance MVP controls rather than a distributed guarantee.
+single-instance MVP controls rather than a distributed guarantee. `trustProxy`
+is unchanged; production proxy/client-address behavior remains a separate
+cutover smoke observation using only redacted or hashed evidence.

@@ -12,6 +12,16 @@ OAuth key. Its stored envelope contains algorithm, unique random 12-byte IV,
 Algorithm/version/transaction identity are authenticated additional data.
 Consumed or expired envelopes are purged within 24 hours and never logged.
 
+Successful callbacks set or rotate the session and issue a 303 to the
+validated same-origin return path. Every failure issues a 303 to fixed
+`/auth/error` with no query string and `Cache-Control: no-store`, `Pragma:
+no-cache`, and `Referrer-Policy: no-referrer`. Google denial and other provider
+error callbacks require state, atomically consume a valid pending transaction
+once, skip token exchange, and audit only `user_denied`, `provider_error`, or
+`invalid_callback`. Ambiguous code-plus-error callbacks fail the same way. Raw
+code, state, nonce, email, provider `error_description`, and callback URL are
+neither rendered nor logged.
+
 OAuth state protects the callback transaction; it is separate from application CSRF.
 
 ## Session token
@@ -28,7 +38,8 @@ OAuth state protects the callback transaction; it is separate from application C
 
 The session token and CSRF token are never stored in localStorage or returned in JSON logs.
 
-Session security metadata stores only a keyed hash of a normalized coarse IP
+Session security metadata stores only HMAC-SHA256 under the dedicated HKDF
+`session-ip-prefix/v1` key of a normalized coarse IP
 prefix and a bounded browser/OS/device-class summary. It never stores a raw IP
 or raw user-agent string, never returns these fields to member/admin APIs, and
 purges them with terminal session retention as defined by the schema.
@@ -43,6 +54,12 @@ State-changing cookie-authenticated API requests require all layers:
 4. a non-simple content type for JSON APIs and explicit content types for upload chunks.
 
 The browser obtains the synchronizer value from an authenticated, no-store bootstrap/CSRF endpoint or server-rendered bootstrap, holds it in memory, and sends the custom header. It is not a cookie and is not localStorage-persisted.
+
+`GET /api/v1/auth/session` returns `401 AUTHENTICATION_REQUIRED` when no valid
+session exists. A valid session returns the safe account projection even when
+the account is pending, disabled, or rejected so the browser can render the
+corresponding bounded state. It does not use a 200 `{authenticated:false}`
+variant.
 
 | Surface                     | Rule                                                                            |
 | --------------------------- | ------------------------------------------------------------------------------- |
