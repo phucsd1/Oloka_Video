@@ -141,3 +141,15 @@ event-loop-delay p99 over 50 ms, or any observed `SQLITE_BUSY`.
 This slice does not implement Google login, OAuth identity, Session, Project,
 Asset/upload, Composition, Preview, Render, provider adapters, product Jobs,
 the durable dispatcher, UI changes, or any Phase 3B behavior.
+
+## Phase 3A.1 production cutover closure
+
+The durability correction was merged through PR #2 at
+`f81680443de94cdbd778f9e30e47e2d2392c100b`. The controlled Hugging Face
+cutover separately verified the merged runtime SHA, `restore-required` startup,
+ready health, startup witness count 3, and an isolated `sqlite-replica/dev`
+Litestream chain containing ten LTX objects at closure. The Space source commit
+used for the cutover was `b01d539...`; runtime identity remained the GitHub
+merge SHA. No database reset occurred, migration v1/v2 stayed byte-stable, and
+the ledger remained exactly versions 1 and 2. This closes Phase 3A.1 and does
+not imply deployment authorization for Slice 3B.

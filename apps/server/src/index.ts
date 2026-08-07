@@ -48,7 +48,7 @@ async function start(): Promise<void> {
       gitCommitSha: environment.gitCommitSha,
       persistence: {
         adapter: "sqlite",
-        schemaVersion: 2,
+        schemaVersion: 3,
         migrationsVerified: true,
       },
       metrics: metrics.snapshot(),

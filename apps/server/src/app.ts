@@ -4,7 +4,7 @@ import {
   readyResponseSchema,
   versionResponseSchema,
 } from "@oloka/contracts";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { LogController, type FastifyInstance } from "fastify";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { AppEnvironment } from "./config/environment.js";
@@ -16,11 +16,17 @@ import { VersionService } from "./system/version-service.js";
 import { RuntimeWitnessService } from "./system/runtime-witness-service.js";
 import { SystemClock } from "./kernel/clock.js";
 import { OperationalMetrics } from "./observability/operational-metrics.js";
+import { registerIdentityRoutes } from "./identity/identity-routes.js";
+import type { OidcProviderClient } from "./identity/oidc-provider-client.js";
+import { IdentityMaintenanceService } from "./identity/identity-maintenance-service.js";
+import { registerErrorHandler } from "./http/error-handler.js";
+import { ApplicationError } from "./http/application-error.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
   serveFrontend?: boolean;
   metrics?: OperationalMetrics;
+  oidcClient?: OidcProviderClient;
 }
 
 export async function buildApplication(
@@ -30,6 +36,7 @@ export async function buildApplication(
   const startupStartedAt = performance.now();
   const metrics = options.metrics ?? new OperationalMetrics();
   const app = Fastify({
+    logController: new LogController({ disableRequestLogging: true }),
     logger:
       environment.logLevel === "silent"
         ? false
@@ -64,6 +71,8 @@ export async function buildApplication(
     );
   }
 
+  registerErrorHandler(app);
+
   app.get("/api/health", () =>
     healthResponseSchema.parse(new HealthService().getHealth()),
   );
@@ -78,17 +87,52 @@ export async function buildApplication(
     versionResponseSchema.parse(new VersionService(environment).getVersion()),
   );
 
+  registerIdentityRoutes({
+    app,
+    database,
+    environment,
+    ...(options.oidcClient === undefined
+      ? {}
+      : { oidcClient: options.oidcClient }),
+  });
+  const identityMaintenance = new IdentityMaintenanceService(
+    database.transactions,
+  );
+  identityMaintenance.run(Date.now());
+  const identityMaintenanceInterval = setInterval(
+    () => {
+      try {
+        identityMaintenance.run(Date.now());
+      } catch (error) {
+        app.log.error(
+          {
+            event: "identity.maintenance.failed",
+            errorType: error instanceof Error ? error.name : "UnknownError",
+          },
+          "identity retention maintenance failed",
+        );
+      }
+    },
+    60 * 60 * 1000,
+  );
+  identityMaintenanceInterval.unref();
+
   if (options.serveFrontend !== false) {
     const webRoot = resolve(process.cwd(), "apps/web/dist");
     await app.register(fastifyStatic, { root: webRoot, wildcard: false });
     app.setNotFoundHandler(async (request, reply) => {
       if (request.url.startsWith("/api/"))
-        return reply.code(404).send({ error: "Not Found" });
+        throw new ApplicationError("RESOURCE_NOT_FOUND", "api_route_not_found");
       return reply.sendFile("index.html");
+    });
+  } else {
+    app.setNotFoundHandler(() => {
+      throw new ApplicationError("RESOURCE_NOT_FOUND", "api_route_not_found");
     });
   }
 
   app.addHook("onClose", async () => {
+    clearInterval(identityMaintenanceInterval);
     await Promise.all([storage.close(), database.close()]);
   });
 

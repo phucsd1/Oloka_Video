@@ -1,12 +1,12 @@
 # Database Migration Strategy
 
-Status: normative; migrations v1/v2 are implemented and immutable.
+Status: normative; migrations v1/v2 are immutable and migration v3 is implemented for Slice 3B review.
 
 ## Contract
 
 Migrations are numbered, named, immutable, forward-only SQL assets executed before the HTTP listener starts. The runner records version, name, SHA-256 checksum, applied time, execution duration, and application build SHA in `schema_migrations`. It refuses startup on a checksum/name mismatch, gap, duplicate version, failed migration, or database schema newer than the application.
 
-The current Persistence Kernel database is schema version 2. Phase 3A.1 changes startup durability only: it creates no migration v3 and does not alter a byte of v1/v2. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
+The merged Persistence Kernel database is schema version 2. Slice 3B advances a reviewed database to schema version 3 through `0003-identity-and-approval.sql` without altering a byte of v1/v2. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
 
 ## Ledger compatibility
 
@@ -25,7 +25,7 @@ The migration test fixture must begin from the actual v1 schema, not a reconstru
 | ------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------- |
 | 1       | foundation            | Existing `schema_migrations` and `system_metadata`                                                                               | already present |
 | 2       | persistence-kernel    | checksum ledger, integer time, metadata normalization, User shell with approval/status evidence, outbox/audit/idempotency kernel | 3A              |
-| 3       | identity-and-security | OAuth identities/AEAD transactions, sessions with redacted security metadata, credential references and identity indexes         | 3B              |
+| 3       | identity-and-approval | OAuth identities/AEAD transactions, sessions with redacted security metadata, credential references and identity indexes         | 3B              |
 | 4       | canonical-project     | Project without current-composition pointer; quota policies with effective intervals and reservations                            | 3C              |
 | 5       | private-assets        | Assets including purge timestamps, upload sessions with canonical offset/chunk evidence, delivery capabilities                   | 3D              |
 | 6       | durable-job-kernel    | generic provider-independent Jobs/Steps/Events, submission-intent fields and dispatcher indexes; no composition FKs              | 3E              |
@@ -80,9 +80,11 @@ Never copy a live `.db` file independently of its WAL/SHM. Use the Node `node:sq
 - injected failure proves transaction rollback;
 - foreign-key and integrity checks;
 - backup restore into the prior application build.
-- three fresh local volumes restored successively from one pinned MinIO replica, proving witness counts 1/2/3 and a byte-stable v1/v2 ledger.
+- a v2 primary upgrades only after a verified backup, then three fresh local volumes are restored successively from one pinned MinIO replica, proving witness counts 1/2/3, a byte-stable v1/v2 prefix, one v3 row, and persisted identity/session mutations.
 
 Litestream 0.5.11 may create `_litestream_lock` and `_litestream_seq` for its own
 coordination. They are provider-internal runtime tables and never ledger
 entries, application migrations, or authorization/product entities. The
-application schema allowlist remains the six Slice 3A tables.
+Slice 3A's allowlist remains the six original application tables. Slice 3B adds
+only `oauth_identities`, `oauth_transactions`, `sessions`, and
+`provider_credential_references`.

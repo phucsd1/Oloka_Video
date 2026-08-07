@@ -1,6 +1,6 @@
 # ADR 0027: Local SQLite with Hugging Face S3 replication
 
-- Status: Accepted for implementation; production cutover pending
+- Status: Accepted, implemented, and production cutover closed at merge `f81680443de94cdbd778f9e30e47e2d2392c100b`
 - Date: 2026-08-06
 
 ## Context

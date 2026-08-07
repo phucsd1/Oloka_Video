@@ -13,6 +13,16 @@ details. Protected telemetry may add a redacted internal cause and stack.
 Responses and durable safe details never expose secrets, raw provider payloads,
 tokens, prompts, filesystem paths, storage keys, or stack traces.
 
+For JSON APIs the exact envelope is `{ error: { code, retryable, messageKey,
+suggestedAction, requestId }, details? }`. Optional `details` is a top-level
+allowlisted schema; arbitrary keys fail validation. `message`, `correlationId`,
+stacks, raw causes, provider responses, database messages, and filesystem paths
+are not public fields. Fastify's request ID is reused in the body,
+`x-request-id`, and protected log context for the same request. One central
+Fastify handler owns mapping: Zod/request failures become `VALIDATION_ERROR`,
+typed dependency errors retain their catalog code, and unknown application or
+database exceptions become `INTERNAL_ERROR`.
+
 Authentication is evaluated before private-resource lookup where needed to
 avoid disclosure. After authentication, a missing resource and a resource owned
 by somebody else both return `RESOURCE_NOT_FOUND`. Names such as

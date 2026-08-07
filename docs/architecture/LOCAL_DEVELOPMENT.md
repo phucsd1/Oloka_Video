@@ -16,7 +16,7 @@ Install exactly Node.js `22.16.0` using `.nvmrc`/`.node-version` and run `npm ci
 - `npm run test:frontend` exercises connected and error states.
 - `npm run build` produces all production artifacts.
 - `npm run test:e2e` starts the compiled server and checks the page in Chromium.
-- `bash scripts/run-docker-litestream-recovery.sh <image>` uses pinned MinIO fixtures to destroy three successive local DB volumes while retaining the replica; it verifies startup counts 1/2/3, unchanged v1/v2 ledger, integrity, signal shutdown, and secret redaction.
+- `bash scripts/run-docker-litestream-recovery.sh <image>` uses pinned MinIO fixtures to start from an exact v2 primary, require a verified v2-to-v3 backup, and destroy three successive local DB volumes while retaining the replica; it verifies startup counts 1/2/3, ledger v1/v2/v3, persisted identity/session mutations, integrity, signal shutdown, and secret redaction.
 
 ## Data cleanup
 
