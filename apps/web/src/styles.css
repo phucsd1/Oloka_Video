@@ -14,6 +14,27 @@ button,
 input {
   font: inherit;
 }
+button,
+.primary-action,
+.secondary-action {
+  border-radius: 10px;
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 750;
+  justify-content: center;
+  padding: 0.78rem 1rem;
+  text-decoration: none;
+}
+.primary-action {
+  background: var(--color-brand);
+  border: 1px solid var(--color-brand);
+  color: white;
+}
+.secondary-action {
+  background: white;
+  border: 1px solid var(--color-line);
+  color: var(--color-ink);
+}
 
 .page-shell {
   min-height: 100vh;
@@ -101,6 +122,36 @@ h1 {
   line-height: 1.7;
   margin: 1.4rem 0 0;
   max-width: 590px;
+}
+.auth-hero {
+  min-height: 52vh;
+}
+.auth-hero .primary-action,
+.account-panel .secondary-action {
+  margin-top: 1.5rem;
+}
+.compact-hero h1,
+.account-panel h1 {
+  font-size: clamp(2.2rem, 5vw, 4.2rem);
+}
+.account-panel,
+.admin-panel {
+  box-shadow: var(--shadow-card);
+  padding: 2rem;
+}
+.admin-user-row {
+  align-items: center;
+  border-top: 1px solid var(--color-line);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 1rem 0;
+}
+.admin-user-row span {
+  color: var(--color-muted);
+  display: block;
+  font-size: 0.9rem;
+  margin-top: 0.25rem;
 }
 .dashboard-grid {
   display: grid;
