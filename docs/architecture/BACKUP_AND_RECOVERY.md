@@ -2,9 +2,13 @@
 
 ## Objectives and limitation
 
-MVP protects recoverability from application/migration error on one HF persistent volume. A backup stored only under the same `/data` volume is not full disaster recovery; loss of the Space storage can lose both live data and local backups. External encrypted, independently retained backup is a required post-MVP control before stronger DR claims.
+MVP uses two complementary mechanisms: Litestream continuously replicates the local SQLite primary to the HF S3 API for ephemeral-disk/rebuild recovery, while authenticated immutable backup sets under `/data` protect migration rollback. Both remain within the same HF provider/account failure domain and are not full disaster recovery. External encrypted, independently retained backup is required before stronger DR claims.
 
 Initial targets for Phase 3 validation: RPO at most 24 hours for periodic snapshots plus a pre-migration snapshot; RTO four hours for a documented operator restore. Product owner must confirm these targets.
+
+The qualification crash observation lost one sparse-write generation and
+restored state 8,018 ms old after a commit 60 ms before termination. This is one
+measurement, not a maximum RPO and not evidence of zero data loss.
 
 ## Consistent SQLite snapshot
 
@@ -46,7 +50,7 @@ Object bytes are immutable and need not be duplicated on every local DB snapshot
 
 ## Restore runbook
 
-1. Stop traffic/app and preserve the failed DB/WAL/SHM/object state under an incident directory without overwriting it.
+1. Stop traffic/app and preserve the failed DB/WAL/SHM/object state under an incident directory without overwriting it. Litestream must be the only supervisor/replicator.
 2. Choose a compatible backup; derive the declared manifest key version,
    canonicalize the manifest, verify its HMAC in constant time, then verify all
    recorded checksums before reading it as restore authority.
@@ -64,4 +68,4 @@ local backups together.
 
 ## Corruption/startup behavior
 
-Startup refuses readiness on migration checksum mismatch, unsupported newer schema, failed quick/foreign-key check, or unavailable database path. It never silently creates a new empty production DB when the expected `/data` DB is corrupt/unavailable. Operators choose restore or explicit incident-mode recovery. Object reconciliation can degrade individual resources without erasing their evidence.
+Production keeps the live DB at `/var/lib/oloka/database/oloka.db`. Startup validates containment/symlinks, then restores an absent DB with `litestream restore -config /etc/litestream.yml -integrity-check quick -if-replica-exists`. Any network, authentication, permission, corruption, timeout, or command error fails closed. `restore-required` also fails when no replica exists; only explicit `fresh-if-replica-missing` permits a fresh DB. Readiness then re-verifies migrations, PRAGMAs, quick integrity, foreign keys, startup initialization, and object storage without making a fresh S3 request on every probe.

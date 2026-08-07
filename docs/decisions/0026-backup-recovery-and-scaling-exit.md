@@ -14,3 +14,7 @@ Create verified pre-migration and periodic consistent snapshots with the officia
 ## Consequences
 
 External encrypted backup is post-MVP before stronger DR claims. Numeric RPO/RTO require owner confirmation. Multiple instances, write/lock pressure, independent workers, managed PITR, or storage/maintenance limits trigger planned SQLite->PostgreSQL, filesystem->S3, dispatcher->multi-worker architecture under new ADRs—not Phase 2 implementation.
+
+ADR 0027 adds Litestream recovery transport for the local primary. It does not
+replace this authenticated backup contract or make same-provider HF S3 an
+independent disaster-recovery domain.

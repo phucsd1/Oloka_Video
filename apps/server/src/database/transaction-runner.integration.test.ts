@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteSystemDatabase } from "./sqlite-system-database.js";
 import { PersistenceBusyError } from "./database.js";
+import { OperationalMetrics } from "../observability/operational-metrics.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -87,7 +88,8 @@ describe("SQLite transaction runner", () => {
     const databaseUrl = pathToFileURL(join(directory, "database.sqlite")).href;
     const first = await SqliteSystemDatabase.connect(databaseUrl);
     await first.migrate();
-    const second = await SqliteSystemDatabase.connect(databaseUrl);
+    const metrics = new OperationalMetrics();
+    const second = await SqliteSystemDatabase.connect(databaseUrl, { metrics });
     second.transactions.run("read", ({ database }) =>
       database.exec("PRAGMA busy_timeout=1"),
     );
@@ -97,6 +99,8 @@ describe("SQLite transaction runner", () => {
         second.transactions.run("immediate", () => undefined),
       ),
     ).toThrow(PersistenceBusyError);
+    expect(metrics.snapshot().sqliteBusyCount).toBe(1);
+    expect(metrics.snapshot().timings.transaction?.count).toBeGreaterThan(0);
     await Promise.all([first.close(), second.close()]);
   });
 });

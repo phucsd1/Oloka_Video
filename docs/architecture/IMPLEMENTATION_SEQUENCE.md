@@ -1,6 +1,6 @@
 # Phase 3 Implementation Sequence
 
-Status: Slice 3A implemented; later slices remain proposed and require explicit authorization.
+Status: Slice 3A implemented; Slice 3A.1 durability implementation is under review and production cutover is pending. Later slices require explicit authorization.
 
 ## 3A — Persistence kernel
 
@@ -18,6 +18,7 @@ Implementation status: complete in Phase 3A. See
   audit redaction, RFC 8785/HMAC-SHA256 backup manifest verification and
   consistent backup/restore on the pinned runtime.
 - Deployment smoke: exact validated HF SHA, schema/readiness metadata, DB/storage restart persistence, no product route added.
+- Durability correction: local primary outside `/data`, Litestream 0.5.11 to HF S3, explicit restore policy, startup witness, and pinned-MinIO three-boot recovery. This does not authorize production cutover or Slice 3B.
 - Rollback: stop app, restore verified pre-v2 snapshot, deploy Phase 2 foundation build; no down migration.
 - Explicitly excluded: Google/auth, Project, Asset/upload, dispatcher Jobs, providers, composition, preview, render, UI.
 - Exit criteria: repository/application boundaries are enforced; no route SQL; v1->v2 and restore drill pass; outbox/audit primitives have deterministic tests. Only this slice may start after Phase 2 approval.

@@ -37,52 +37,25 @@ jobs:
             --build-arg GIT_COMMIT_SHA=${GITHUB_SHA} \
             --build-arg BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
             -t oloka-video:${GITHUB_SHA} .
-      - name: Verify production image restart persistence
-        env:
-          OLOKA_APP_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      - name: Verify production image durability contract
         run: |
-          volume="oloka-video-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          first="oloka-video-first-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          second="oloka-video-second-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup() {
-            docker rm -f "$first" "$second" >/dev/null 2>&1 || true
-            docker volume rm "$volume" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          docker volume create "$volume" >/dev/null
-          docker run -d --name "$first" -p 17860:7860 \
-            -e OLOKA_APP_KEY="$OLOKA_APP_KEY" \
-            -v "$volume:/data" oloka-video:${GITHUB_SHA} >/dev/null
-          for attempt in $(seq 1 30); do
-            curl --fail --silent http://127.0.0.1:17860/api/ready && break
-            sleep 1
-          done
-          curl --fail http://127.0.0.1:17860/api/health
-          curl --fail http://127.0.0.1:17860/api/ready
-          test "$(curl --fail --silent http://127.0.0.1:17860/api/version | jq -r .gitCommitSha)" = "$GITHUB_SHA"
-          docker stop "$first" >/dev/null
-          docker rm "$first" >/dev/null
-          docker run -d --name "$second" -p 17860:7860 \
-            -e OLOKA_APP_KEY="$OLOKA_APP_KEY" \
-            -v "$volume:/data" oloka-video:${GITHUB_SHA} >/dev/null
-          for attempt in $(seq 1 30); do
-            curl --fail --silent http://127.0.0.1:17860/api/ready && break
-            sleep 1
-          done
-          curl --fail http://127.0.0.1:17860/api/health
-          curl --fail http://127.0.0.1:17860/api/ready
-          test "$(curl --fail --silent http://127.0.0.1:17860/api/version | jq -r .gitCommitSha)" = "$GITHUB_SHA"
-          docker exec "$second" node --input-type=module -e "
-            import { access, mkdir, rm, writeFile } from 'node:fs/promises';
-            import { DatabaseSync } from 'node:sqlite';
-            const db = new DatabaseSync('/data/database/oloka-dev.db', { readOnly: true });
-            const ledger = db.prepare('SELECT version, COUNT(*) AS count FROM schema_migrations GROUP BY version ORDER BY version').all();
-            db.close();
-            if (JSON.stringify(ledger) !== JSON.stringify([{ version: 1, count: 1 }, { version: 2, count: 1 }])) throw new Error('migration ledger replayed');
-            await access('/data/database/oloka-dev.db-wal');
-            await access('/data/database/oloka-dev.db-shm');
-            const probe = '/data/backups/ci-write-test';
-            await mkdir(probe, { recursive: true });
-            await writeFile(probe + '/probe', 'ok', 'utf8');
-            await rm(probe, { recursive: true });
-          "
+          test "$(docker run --rm --entrypoint node oloka-video:${GITHUB_SHA} --version)" = "v22.16.0"
+          test "$(docker run --rm --entrypoint litestream oloka-video:${GITHUB_SHA} version)" = "0.5.11"
+          test "$(docker image inspect oloka-video:${GITHUB_SHA} --format '{{.Config.User}}')" = "1000:1000"
+          test "$(docker image inspect oloka-video:${GITHUB_SHA} --format '{{index .Config.Labels "org.oloka.litestream.version"}}')" = "0.5.11"
+          test "$(docker image inspect oloka-video:${GITHUB_SHA} --format '{{index .Config.Labels "org.oloka.litestream.archive.sha256"}}')" = "2f80fdb6b0a0ff7a116ee37adf02d3de8e977ef76e052b28a6690218f0f7ab55"
+          docker run --rm --entrypoint sh oloka-video:${GITHUB_SHA} -c \
+            "test ! -e /usr/bin/curl && test ! -e /usr/bin/wget && test -r /usr/share/licenses/litestream/LICENSE && ! grep -E 'access-key|secret-access-key|HF_S3_ACCESS_KEY_ID|HF_S3_SECRET_ACCESS_KEY' /etc/litestream.yml"
+          set +e
+          missing_output="$(docker run --rm oloka-video:${GITHUB_SHA} 2>&1)"
+          missing_exit=$?
+          set -e
+          test "$missing_exit" -ne 0
+          grep -q 'HF_S3_ACCESS_KEY_ID is required' <<<"$missing_output"
+          ! grep -q 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' <<<"$missing_output"
+      - name: Verify MinIO replication and ephemeral local recovery
+        env:
+          RECOVERY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/run-docker-litestream-recovery.sh oloka-video:${GITHUB_SHA}
+      - name: Record production image digest
+        run: docker image inspect oloka-video:${GITHUB_SHA} --format 'image_id={{.Id}} repo_digests={{json .RepoDigests}}'

@@ -33,8 +33,9 @@ npm run dev
 The API listens on `http://localhost:7860`; Vite serves the local frontend on `http://localhost:5173` and proxies `/api` to the backend. On Windows, override the Linux online defaults:
 
 ```powershell
-$env:DATA_DIR = "$PWD\.data"
-$env:DATABASE_URL = "file:$($PWD.Path.Replace('\','/'))/.data/database/oloka-dev.db"
+$env:OBJECT_STORAGE_ROOT = "$PWD\.data\objects"
+$env:DATABASE_PATH = "$PWD\.data\local\oloka-dev.db"
+$env:OLOKA_DATABASE_BOOTSTRAP_MODE = "fresh-if-replica-missing"
 npm run dev
 ```
 
@@ -63,12 +64,16 @@ docker build \
   --build-arg BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
   -t oloka-video:dev .
 
-docker run --rm -p 7860:7860 \
-  -e OLOKA_APP_KEY="$OLOKA_APP_KEY" \
-  -v oloka-video-data:/data oloka-video:dev
+bash scripts/run-docker-litestream-recovery.sh oloka-video:dev
 ```
 
-The named volume is mounted at `/data`; the development SQLite database is created at `/data/database/oloka-dev.db`. The process runs as UID `1000`.
+The recovery harness uses pinned MinIO fixtures, replaces the local database
+volume three times, and preserves only its test replica/object volumes between
+boots. The production image runs as UID `1000`, keeps the live database at
+`/var/lib/oloka/database/oloka.db`, and reserves `/data` for persistent objects
+and backup artifacts. A manual container run must supply explicit bootstrap
+mode plus S3 credentials through environment variables; never place them in the
+image or YAML.
 
 ## Verify the service
 
@@ -85,8 +90,9 @@ curl http://localhost:7860/api/version
 1. Create the Docker Space `phucsd/Oloka-Video-Dev` and select Docker SDK.
 2. Configure persistent storage so Hugging Face mounts it at `/data`.
 3. In the GitHub repository, open **Settings → Secrets and variables → Actions** and add a repository secret named `HF_TOKEN`. Use a Hugging Face token with write access to the target Space.
-4. Push a validated change to `develop`. `.github/workflows/deploy-hf.yml` runs the full validation workflow and only pushes to the Space after it succeeds.
-5. Open the Space **Logs** tab to view Docker build logs and structured runtime logs. The public application is available at `https://phucsd-oloka-video-dev.hf.space` after the Space reaches `RUNNING`.
+4. Configure Space secrets `OLOKA_APP_KEY`, `HF_S3_ACCESS_KEY_ID`, and `HF_S3_SECRET_ACCESS_KEY`. Configure the non-secret Space variable `OLOKA_DATABASE_BOOTSTRAP_MODE` only during the separately approved cutover gate.
+5. Push a validated change to `develop`. `.github/workflows/deploy-hf.yml` runs the full validation workflow and only uploads after all required secret names and the explicit bootstrap variable exist.
+6. Open the Space **Logs** tab to view Docker build logs and structured runtime logs. The public application is available at `https://phucsd-oloka-video-dev.hf.space` after the Space reaches `RUNNING`.
 
 No token belongs in `.env`, Git history, Docker build arguments, or the Space repository.
 
