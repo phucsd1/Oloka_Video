@@ -7,6 +7,16 @@ import {
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 
+export type FakeOidcMode =
+  | "happy"
+  | "missing-email"
+  | "unverified-email"
+  | "wrong-nonce"
+  | "invalid-signature"
+  | "expired-token"
+  | "malformed-token"
+  | "token-timeout";
+
 export class FakeOidcServer {
   private readonly authorizationCodes = new Map<
     string,
@@ -20,9 +30,14 @@ export class FakeOidcServer {
   private readonly keyPair = generateKeyPairSync("rsa", {
     modulusLength: 2048,
   });
+  private readonly untrustedKeyPair = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
   private readonly keyId = "fake-test-key";
   private server: Server | undefined;
   issuer = "";
+
+  constructor(private readonly mode: FakeOidcMode = "happy") {}
 
   async start(): Promise<void> {
     this.server = createServer((request, response) => {
@@ -104,6 +119,7 @@ export class FakeOidcServer {
       return;
     }
     if (method === "POST" && url.pathname === "/token") {
+      if (this.mode === "token-timeout") await delay(1_500);
       const body = new URLSearchParams(await readBody(request));
       const code = required(body.get("code"));
       const transaction = this.authorizationCodes.get(code);
@@ -123,17 +139,31 @@ export class FakeOidcServer {
         return sendOAuthError(response, "invalid_grant");
       }
       const now = Math.floor(Date.now() / 1000);
-      const idToken = this.signJwt({
+      if (this.mode === "malformed-token") {
+        return sendJson(response, {
+          access_token: "opaque-access-token-for-test-only",
+          token_type: "Bearer",
+          expires_in: 300,
+          id_token: "not-a-signed-jwt",
+        });
+      }
+      const payload: Record<string, unknown> = {
         iss: this.issuer,
         aud: transaction.clientId,
         sub: "signed-google-subject",
-        email: "signed-admin@example.test",
-        email_verified: true,
         name: "Signed Admin",
-        nonce: transaction.nonce,
+        nonce:
+          this.mode === "wrong-nonce"
+            ? "nonce-that-does-not-match"
+            : transaction.nonce,
         iat: now,
-        exp: now + 300,
-      });
+        exp: this.mode === "expired-token" ? now - 3_600 : now + 300,
+      };
+      if (this.mode !== "missing-email") {
+        payload.email = "signed-admin@example.test";
+        payload.email_verified = this.mode !== "unverified-email";
+      }
+      const idToken = this.signJwt(payload);
       return sendJson(response, {
         access_token: "opaque-access-token-for-test-only",
         token_type: "Bearer",
@@ -154,10 +184,18 @@ export class FakeOidcServer {
     const signature = createSign("RSA-SHA256")
       .update(signingInput)
       .end()
-      .sign(this.keyPair.privateKey)
+      .sign(
+        this.mode === "invalid-signature"
+          ? this.untrustedKeyPair.privateKey
+          : this.keyPair.privateKey,
+      )
       .toString("base64url");
     return `${signingInput}.${signature}`;
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function required(value: string | null): string {

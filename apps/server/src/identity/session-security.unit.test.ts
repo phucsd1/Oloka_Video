@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   SESSION_COOKIE_NAME,
   createSessionCookie,
+  generateOpaqueToken,
   hashCoarseIpPrefix,
   hashOpaqueToken,
+  readSessionCookie,
   summarizeUserAgent,
 } from "./session-security.js";
 
@@ -11,7 +13,9 @@ describe("session security", () => {
   it("stores only hashes, coarsens IP metadata, and emits a host-only secure cookie", () => {
     const applicationKey = Buffer.alloc(32, 4);
     const rawToken = "a-raw-session-token";
+    const generatedToken = generateOpaqueToken();
 
+    expect(Buffer.from(generatedToken, "base64url")).toHaveLength(32);
     expect(hashOpaqueToken(rawToken)).toHaveLength(32);
     expect(hashOpaqueToken(rawToken).toString("utf8")).not.toContain(rawToken);
     expect(
@@ -33,6 +37,8 @@ describe("session security", () => {
     expect(cookie).toContain("Secure");
     expect(cookie).toContain("SameSite=Lax");
     expect(cookie).not.toContain("Domain=");
+    expect(readSessionCookie(cookie)).toBe(rawToken);
+    expect(readSessionCookie(`${SESSION_COOKIE_NAME}=%not-valid`)).toBeNull();
     expect(
       summarizeUserAgent(
         "Mozilla/5.0 (Windows NT 10.0) Chrome/123.4 private-free-form",

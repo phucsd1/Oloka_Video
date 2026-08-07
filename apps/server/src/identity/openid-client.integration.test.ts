@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApplication } from "../app.js";
 import { parseEnvironment } from "../config/environment.js";
-import { FakeOidcServer } from "./fake-oidc-server.fixture.js";
+import {
+  FakeOidcServer,
+  type FakeOidcMode,
+} from "./fake-oidc-server.fixture.js";
 import { OpenIdClientAdapter } from "./oidc-provider-client.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -60,4 +63,90 @@ describe("openid-client adapter", () => {
     expect(completed.statusCode, completed.body).toBe(303);
     expect(completed.headers["set-cookie"]).toContain("__Host-oloka_session=");
   });
+
+  it.each([
+    "missing-email",
+    "unverified-email",
+    "wrong-nonce",
+    "invalid-signature",
+    "expired-token",
+    "malformed-token",
+  ] as FakeOidcMode[])("rejects the %s provider response", async (mode) => {
+    const flow = await authorize(mode);
+    await expect(
+      flow.adapter.exchangeCallback(flow.callbackRequest),
+    ).rejects.toBeDefined();
+  });
+
+  it("rejects state and PKCE mismatches and a replayed provider code", async () => {
+    const wrongState = await authorize("happy");
+    await expect(
+      wrongState.adapter.exchangeCallback({
+        ...wrongState.callbackRequest,
+        expectedState: "state-that-does-not-match",
+      }),
+    ).rejects.toBeDefined();
+
+    const wrongPkce = await authorize("happy");
+    await expect(
+      wrongPkce.adapter.exchangeCallback({
+        ...wrongPkce.callbackRequest,
+        pkceCodeVerifier: "wrong-verifier-that-is-long-enough-for-pkce",
+      }),
+    ).rejects.toBeDefined();
+
+    const replay = await authorize("happy");
+    await expect(
+      replay.adapter.exchangeCallback(replay.callbackRequest),
+    ).resolves.toMatchObject({
+      subject: "signed-google-subject",
+      emailVerified: true,
+    });
+    await expect(
+      replay.adapter.exchangeCallback(replay.callbackRequest),
+    ).rejects.toBeDefined();
+  });
+
+  it("bounds a stalled token endpoint", async () => {
+    const flow = await authorize("token-timeout", 1);
+    await expect(
+      flow.adapter.exchangeCallback(flow.callbackRequest),
+    ).rejects.toBeDefined();
+  });
 });
+
+async function authorize(mode: FakeOidcMode, timeoutSeconds = 10) {
+  const fakeOidc = new FakeOidcServer(mode);
+  await fakeOidc.start();
+  cleanup.push(() => fakeOidc.stop());
+  const adapter = new OpenIdClientAdapter(
+    fakeOidc.issuer,
+    "test-client",
+    "test-client-secret",
+    { allowInsecureIssuer: true, timeoutSeconds },
+  );
+  const state = "test-state-value";
+  const nonce = "test-nonce-value";
+  const pkceCodeVerifier = "v".repeat(43);
+  const authorizationUrl = await adapter.createAuthorizationUrl({
+    redirectUri: "https://oloka.example.test/api/v1/auth/google/callback",
+    state,
+    nonce,
+    codeChallenge: createHash("sha256")
+      .update(pkceCodeVerifier, "utf8")
+      .digest("base64url"),
+    codeChallengeMethod: "S256",
+  });
+  const response = await fetch(authorizationUrl, { redirect: "manual" });
+  const callbackUrl = new URL(response.headers.get("location")!);
+  return {
+    adapter,
+    callbackRequest: {
+      callbackUrl,
+      expectedState: state,
+      expectedNonce: nonce,
+      pkceCodeVerifier,
+    },
+  };
+}
+import { createHash } from "node:crypto";

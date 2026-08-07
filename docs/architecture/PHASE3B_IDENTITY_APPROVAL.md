@@ -31,9 +31,14 @@ The server pins `openid-client` `6.8.4`, the current reviewed v6 release when
 the slice was implemented. Its official documentation supports the required
 Authorization Code flow, PKCE S256, state, nonce, issuer discovery, signed ID
 Token verification, and Node 20+; Node `22.16.0` satisfies that runtime floor.
+The adapter explicitly enables application-level signature validation against
+the discovered JWKS instead of relying on the library's direct-TLS default.
 Tests use an in-process fake issuer with discovery, authorization, token, JWKS,
-RS256 signature, and PKCE verification. The fixture is excluded from the
-production TypeScript build and there is no runtime fake-provider flag.
+RS256 signature, and PKCE verification. It rejects missing or unverified email,
+wrong nonce, invalid signature, expiry, malformed token response, state/PKCE
+mismatch, code replay, and a bounded token-endpoint timeout. The fixture is
+excluded from the production TypeScript build and there is no runtime
+fake-provider flag.
 
 OAuth state and nonce are stored only as SHA-256 hashes. The PKCE verifier and
 nonce recovery envelope is AES-256-GCM with a 12-byte random IV, 16-byte tag,

@@ -11,9 +11,11 @@ describe("OAuth transaction cryptography", () => {
     const applicationKey = Buffer.alloc(32, 7);
 
     const sealed = sealPkceVerifier(applicationKey, transactionId, verifier);
+    const second = sealPkceVerifier(applicationKey, transactionId, verifier);
 
     expect(sealed.keyVersion).toBe(1);
     expect(sealed.iv).toHaveLength(12);
+    expect(second.iv.equals(sealed.iv)).toBe(false);
     expect(sealed.authTag).toHaveLength(16);
     expect(sealed.ciphertext.toString("utf8")).not.toContain(verifier);
     expect(openPkceVerifier(applicationKey, transactionId, sealed)).toBe(
@@ -25,6 +27,12 @@ describe("OAuth transaction cryptography", () => {
         "00000000-0000-4000-8000-000000000002",
         sealed,
       ),
+    ).toThrow(/authentication/i);
+    expect(() =>
+      openPkceVerifier(applicationKey, transactionId, {
+        ...sealed,
+        keyVersion: 2,
+      }),
     ).toThrow(/authentication/i);
   });
 });

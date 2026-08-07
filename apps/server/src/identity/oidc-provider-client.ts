@@ -35,7 +35,10 @@ export class OpenIdClientAdapter implements OidcProviderClient {
     private readonly issuer: string,
     private readonly clientId: string,
     private readonly clientSecret: string,
-    private readonly testOptions: { allowInsecureIssuer?: boolean } = {},
+    private readonly testOptions: {
+      allowInsecureIssuer?: boolean;
+      timeoutSeconds?: number;
+    } = {},
   ) {}
 
   async createAuthorizationUrl(
@@ -96,10 +99,13 @@ export class OpenIdClientAdapter implements OidcProviderClient {
       this.clientSecret,
       undefined,
       {
-        timeout: 10,
-        ...(this.testOptions.allowInsecureIssuer === true
-          ? { execute: [oidc.allowInsecureRequests] }
-          : {}),
+        timeout: this.testOptions.timeoutSeconds ?? 10,
+        execute: [
+          oidc.enableNonRepudiationChecks,
+          ...(this.testOptions.allowInsecureIssuer === true
+            ? [oidc.allowInsecureRequests]
+            : []),
+        ],
       },
     );
     return this.configuration;

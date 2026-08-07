@@ -89,6 +89,11 @@ describe("identity HTTP routes", () => {
     );
     const cookie = callback.headers["set-cookie"] as string;
     expect(cookie).toContain("__Host-oloka_session=");
+    expect(cookie).toContain("Path=/");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).not.toContain("Domain=");
     const replayedCallback = await app.inject({
       method: "GET",
       url: `/api/v1/auth/google/callback?code=replayed-code&state=${encodeURIComponent(state)}`,
@@ -112,6 +117,12 @@ describe("identity HTTP routes", () => {
         status: "active",
       },
     });
+    const visitorAdmin = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/users",
+    });
+    expect(visitorAdmin.statusCode).toBe(401);
+    expect(visitorAdmin.json().error.code).toBe("AUTHENTICATION_REQUIRED");
 
     nextIdentity = {
       subject: "google-subject-2",
@@ -169,6 +180,7 @@ describe("identity HTTP routes", () => {
       headers: { cookie: cookie.split(";")[0]! },
     });
     const csrfToken = csrf.json().csrfToken as string;
+    expect(csrf.headers["cache-control"]).toBe("no-store");
     const users = await app.inject({
       method: "GET",
       url: "/api/v1/admin/users?status=pending",
@@ -184,6 +196,36 @@ describe("identity HTTP routes", () => {
       version: pendingUser.version,
       reason: "Approved for the closed beta",
     };
+    const wrongOrigin = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/users/${pendingUser.id}`,
+      headers: {
+        cookie: cookie.split(";")[0]!,
+        origin: "https://attacker.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": csrfToken,
+        "idempotency-key": "approve-member-wrong-origin",
+      },
+      payload: transitionBody,
+    });
+    expect(wrongOrigin.statusCode).toBe(403);
+    expect(wrongOrigin.json().error.code).toBe("CSRF_VALIDATION_FAILED");
+
+    const wrongToken = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/users/${pendingUser.id}`,
+      headers: {
+        cookie: cookie.split(";")[0]!,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": "not-the-current-csrf-token",
+        "idempotency-key": "approve-member-wrong-token",
+      },
+      payload: transitionBody,
+    });
+    expect(wrongToken.statusCode).toBe(403);
+    expect(wrongToken.json().error.code).toBe("CSRF_VALIDATION_FAILED");
+
     const missingOrigin = await app.inject({
       method: "PATCH",
       url: `/api/v1/admin/users/${pendingUser.id}`,
@@ -227,7 +269,89 @@ describe("identity HTTP routes", () => {
     expect(replayedApproval.statusCode).toBe(200);
     expect(replayedApproval.headers["idempotency-replayed"]).toBe("true");
 
-    const adminUser = session.json().user as { id: string; version: number };
+    nextIdentity = {
+      subject: "google-subject-2",
+      email: "member@example.test",
+      emailVerified: true,
+      displayName: "Thành viên đã duyệt",
+      avatarUrl: null,
+    };
+    const activeMemberStart = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/google/start",
+    });
+    const activeMemberState = new URL(
+      activeMemberStart.headers.location!,
+    ).searchParams.get("state")!;
+    const activeMemberCallback = await app.inject({
+      method: "GET",
+      url: `/api/v1/auth/google/callback?code=active-member&state=${encodeURIComponent(activeMemberState)}`,
+    });
+    const activeMemberCookie = (
+      activeMemberCallback.headers["set-cookie"] as string
+    ).split(";")[0]!;
+    const memberDeniedAdmin = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/users",
+      headers: { cookie: activeMemberCookie },
+    });
+    expect(memberDeniedAdmin.statusCode).toBe(403);
+    expect(memberDeniedAdmin.json().error.code).toBe("AUTHORIZATION_DENIED");
+
+    nextIdentity = {
+      subject: "google-subject-1",
+      email: "admin@example.test",
+      emailVerified: true,
+      displayName: "Quản trị viên",
+      avatarUrl: "https://images.example.test/admin.png",
+    };
+    const secondAdminStart = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/google/start",
+    });
+    const secondAdminState = new URL(
+      secondAdminStart.headers.location!,
+    ).searchParams.get("state")!;
+    const secondAdminCallback = await app.inject({
+      method: "GET",
+      url: `/api/v1/auth/google/callback?code=second-admin-session&state=${encodeURIComponent(secondAdminState)}`,
+    });
+    const secondAdminCookie = (
+      secondAdminCallback.headers["set-cookie"] as string
+    ).split(";")[0]!;
+    const secondAdminCsrf = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/csrf",
+      headers: { cookie: secondAdminCookie },
+    });
+    const refererLogout = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/logout",
+      headers: {
+        cookie: secondAdminCookie,
+        referer: "https://oloka.example.test/account/security",
+        "content-type": "application/json",
+        "x-oloka-csrf": secondAdminCsrf.json().csrfToken as string,
+      },
+      payload: {},
+    });
+    expect(refererLogout.statusCode).toBe(204);
+    const loggedOutSession = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/session",
+      headers: { cookie: secondAdminCookie },
+    });
+    expect(loggedOutSession.json()).toEqual({ authenticated: false });
+
+    const refreshedAdminSession = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/session",
+      headers: { cookie: cookie.split(";")[0]! },
+    });
+    const adminUser = refreshedAdminSession.json().user as {
+      id: string;
+      version: number;
+    };
     const lockOutFinalAdmin = await app.inject({
       method: "PATCH",
       url: `/api/v1/admin/users/${adminUser.id}`,
