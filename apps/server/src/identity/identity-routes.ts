@@ -39,7 +39,7 @@ export interface RegisterIdentityRoutesOptions {
 
 export function registerIdentityRoutes(
   options: RegisterIdentityRoutesOptions,
-): void {
+): IdentityService | undefined {
   const { app, database, environment } = options;
   const configuration = environment.identity;
   const applicationKey = environment.appKey;
@@ -305,6 +305,7 @@ export function registerIdentityRoutes(
       .header("idempotency-replayed", result.replayed ? "true" : "false")
       .send({ user: result.user });
   });
+  return service;
 }
 
 function callbackFailureCategory(error: unknown): string {
@@ -359,6 +360,26 @@ function requireSession(
   const session = service.getSession(readSessionCookie(request.headers.cookie));
   if (session === null) throw authenticationRequired();
   return session;
+}
+
+export function requireProtectedSession(
+  service: IdentityService | undefined,
+  request: FastifyRequest,
+): AuthenticatedSession {
+  if (service === undefined) throw authenticationRequired();
+  const session = requireSession(service, request);
+  service.auditStatusDenial(session);
+  requireActiveUser(session);
+  return session;
+}
+
+export function verifyProtectedCsrfRequest(
+  service: IdentityService,
+  session: AuthenticatedSession,
+  request: FastifyRequest,
+  publicOrigin: string | undefined,
+): void {
+  verifyCsrfRequest(service, session, request, publicOrigin, undefined);
 }
 
 function requireAdmin(
