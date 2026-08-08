@@ -120,6 +120,13 @@ describe("Project service", () => {
         favorite: true,
         version: 2,
       });
+      expect(
+        fixture.service.getActive(fixture.actor, created.id).favorite,
+      ).toBe(true);
+      expectErrorCode(
+        () => fixture.service.getActive(fixture.otherActor, created.id),
+        "RESOURCE_NOT_FOUND",
+      );
       expectErrorCode(
         () =>
           fixture.service.update(
@@ -169,6 +176,58 @@ describe("Project service", () => {
         status: "active",
         version: 3,
       });
+    } finally {
+      await fixture.database.close();
+    }
+  });
+
+  it("rolls back Project, audit, and idempotency writes when audit append fails", async () => {
+    const fixture = await createFixture();
+    try {
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database.exec(`CREATE TRIGGER fail_project_create_audit
+          BEFORE INSERT ON audit_events
+          WHEN NEW.action = 'project.create'
+          BEGIN
+            SELECT RAISE(ABORT, 'forced project audit failure');
+          END`);
+      });
+
+      expect(() =>
+        fixture.service.create(
+          fixture.actor,
+          { name: "Must roll back" },
+          "create-audit-failure",
+        ),
+      ).toThrow(/forced project audit failure/);
+
+      const counts = fixture.database.transactions.run(
+        "read",
+        ({ database }) => ({
+          projects: (
+            database
+              .prepare("SELECT COUNT(*) AS count FROM projects")
+              .get() as {
+              count: number;
+            }
+          ).count,
+          audits: (
+            database
+              .prepare(
+                "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'project.create'",
+              )
+              .get() as { count: number }
+          ).count,
+          idempotency: (
+            database
+              .prepare(
+                "SELECT COUNT(*) AS count FROM idempotency_records WHERE operation = 'project.create'",
+              )
+              .get() as { count: number }
+          ).count,
+        }),
+      );
+      expect(counts).toEqual({ projects: 0, audits: 0, idempotency: 0 });
     } finally {
       await fixture.database.close();
     }
