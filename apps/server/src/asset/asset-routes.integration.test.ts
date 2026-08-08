@@ -168,6 +168,29 @@ describe("Asset HTTP routes", () => {
       });
       expect(wrongOperation.statusCode).toBe(404);
 
+      const downloadCapabilityResponse = await fixture.app.inject({
+        method: "POST",
+        url: `/api/v1/assets/${assetId}/delivery-capabilities`,
+        headers: {
+          ...common,
+          "content-type": "application/json",
+          "idempotency-key": "route-download-capability",
+        },
+        payload: { operation: "download" },
+      });
+      expect(
+        downloadCapabilityResponse.statusCode,
+        downloadCapabilityResponse.body,
+      ).toBe(200);
+      const downloadCapability = downloadCapabilityResponse.json()
+        .capability as string;
+      const download = await fixture.app.inject({
+        method: "GET",
+        url: `/api/v1/assets/${assetId}/content?capability=${encodeURIComponent(downloadCapability)}&operation=download`,
+      });
+      expect(download.statusCode, download.body).toBe(200);
+      expect(download.headers["content-disposition"]).toMatch(/^attachment;/);
+
       const head = await fixture.app.inject({
         method: "HEAD",
         url: `/api/v1/assets/${assetId}/content`,
