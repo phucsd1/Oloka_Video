@@ -1,6 +1,6 @@
 # Database Schema V1
 
-Status: logical schema blueprint for Phase 3 migrations; it is not SQL and does not change the current database.
+Status: logical schema blueprint. Project migration v4 is implementation in review; production remains on schema v3 pending a separate cutover.
 
 ## Conventions
 
@@ -161,6 +161,11 @@ When `status=purged`, name and description are cleared/redacted, favorite is
 false, current-composition pointer is null, `purged_at` and policy version are
 required, and only opaque ownership lineage plus safe audit metadata remains.
 No hard cascade from user.
+
+Slice 3C migration v4 creates only this Project foundation. The nullable
+`current_composition_version_id` column intentionally has no foreign key until
+the Composition table is introduced in its authorized later migration. Slice
+3C does not create Asset, Job, quota, queue, or purge-worker tables.
 
 ### `assets`
 
@@ -644,9 +649,9 @@ has the stated mapping; it does not authorize an unlisted JSON sidecar.
 | RenderOutput mutable lifecycle/review fields                                                 | `render_output_state` columns                                                                   | stored              | guarded audited transitions only                                 |                   v8 |
 | ProviderCredentialReference all domain fields                                                | `provider_credential_references` provider/purpose/environment/status/health/timestamps columns  | stored              | reference only; no secret value                                  |                   v3 |
 | AuditEvent all domain fields                                                                 | `audit_events` actor/action/resource/outcome/metadata/time columns                              | stored              | append-only redacted event                                       |                   v2 |
-| QuotaPolicy `id`, `scopeType`, `scopeId`, `limits`                                           | `quota_policies.id`, `scope_type`, `scope_id`, `policy_json`                                    | stored              | typed limits and scope check                                     |                   v4 |
-| QuotaPolicy `effectiveFrom`, `effectiveUntil`                                                | `quota_policies.effective_from`, `effective_until`                                              | stored              | non-overlapping half-open interval                               |                   v4 |
-| QuotaPolicy `createdBy`, `createdAt`, `updatedAt`                                            | `created_by_user_id`, `created_at`; update equals immutable creation instant                    | stored/derived      | append-only version; no in-place update                          |                   v4 |
+| QuotaPolicy `id`, `scopeType`, `scopeId`, `limits`                                           | `quota_policies.id`, `scope_type`, `scope_id`, `policy_json`                                    | stored              | typed limits and scope check                                     |     authorized later |
+| QuotaPolicy `effectiveFrom`, `effectiveUntil`                                                | `quota_policies.effective_from`, `effective_until`                                              | stored              | non-overlapping half-open interval                               |     authorized later |
+| QuotaPolicy `createdBy`, `createdAt`, `updatedAt`                                            | `created_by_user_id`, `created_at`; update equals immutable creation instant                    | stored/derived      | append-only version; no in-place update                          |     authorized later |
 
 ## Delete policy summary
 

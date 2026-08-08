@@ -1,6 +1,6 @@
 # API Contract V1
 
-Status: capability map and transport contract; no route implementation exists from this document.
+Status: capability map and transport contract. API-011 through API-016 and API-062 are implementation in review for Slice 3C; production cutover is pending.
 
 ## Protocol conventions
 
@@ -21,6 +21,20 @@ Status: capability map and transport contract; no route implementation exists fr
 - Lists use an opaque base64url cursor containing versioned canonical sort position, filter fingerprint, and ID tie-breaker. Default/max page sizes are 25/100. Sorting is deterministic; cursor/filter mismatch is `400 INVALID_CURSOR`.
 - Times are ISO 8601 UTC strings at the HTTP boundary and epoch milliseconds in SQLite.
 - IDs, not storage keys/paths/provider secrets, cross the API boundary.
+
+### Slice 3C Project projection
+
+Owner Project responses expose only `id`, `name`, nullable `description`,
+`favorite`, `status`, ISO-8601 UTC `createdAt`/`updatedAt`, and positive
+`version`. They never expose owner columns, retention/purge internals, storage
+keys, or filesystem paths. Owner routes return `404 RESOURCE_NOT_FOUND` for a
+different owner, including when the actor is an admin.
+
+Slice 3C lists only `active` Projects at API-011 and only `soft_deleted`
+Projects at API-062. Both use the authenticated opaque cursor contract and the
+owner list order `favorite DESC, updated_at DESC, id DESC`. Slice 3C does not
+implement purge scheduling/worker side effects despite the later-state schema
+foundation.
 
 ## Common errors
 

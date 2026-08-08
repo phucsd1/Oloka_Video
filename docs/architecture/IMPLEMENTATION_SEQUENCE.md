@@ -1,6 +1,6 @@
 # Phase 3 Implementation Sequence
 
-Status: Slice 3A.1 durability is merged and its controlled production cutover is closed. Slice 3B is implemented on its isolated review branch and remains undeployed pending review. Later slices require explicit authorization.
+Status: Slice 3A.1 durability and Slice 3B identity/approval production cutovers are closed. Slice 3C is implementation in review with production cutover pending. Later slices require explicit authorization.
 
 ## 3A — Persistence kernel
 
@@ -26,7 +26,7 @@ Implementation status: complete in Phase 3A. See
 
 ## 3B — Identity and approval
 
-Implementation status: complete on `codex/phase3b-identity-approval` for review; not deployed or merged. See `PHASE3B_IDENTITY_APPROVAL.md`.
+Implementation status: complete, merged, and production cutover closed. See `PHASE3B_IDENTITY_APPROVAL.md`.
 
 - Modules/files: Google OIDC adapter, AEAD OAuth transaction store,
   user/identity/session repositories, HKDF-separated cookie/CSRF/cursor keys,
@@ -47,8 +47,12 @@ Implementation status: complete on `codex/phase3b-identity-approval` for review;
 
 ## 3C — Canonical Project
 
-- Modules/files: Project contracts/repository/service/routes, Project list/trash queries, owner authorization, quota policy read/override foundation, retention scheduling intent.
-- Schema/migration: v4 projects, quota policies/reservations as required, ownership/lifecycle/list indexes and idempotency links.
+Implementation status: implementation in review on
+`codex/phase3c-canonical-project`; production cutover pending. See
+`PHASE3C_CANONICAL_PROJECT.md`.
+
+- Modules/files: Project contracts/repository/service/routes, Project list/trash queries, owner authorization, 30-day restore policy, and minimal owner UI.
+- Schema/migration: v4 projects with ownership/lifecycle/list/retention indexes; quota policy/reservation implementation remains deferred until explicitly authorized.
 - Test gate: create/list/read/rename/favorite, version/idempotency races, soft delete/trash/30-day restore, purge-lease conflict/tombstone-ready state, cross-user isolation, restart persistence and indexed query plans.
 - Deployment smoke: active member performs full Project lifecycle across restart; pending/other member cannot access; no bytes are deleted in request.
 - Rollback: stop Project mutations, preserve rows, deploy compatible reader or forward fix; restore only before accepted v4 writes or with explicit data-loss approval.
