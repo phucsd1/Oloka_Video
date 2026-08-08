@@ -137,7 +137,7 @@ stop_boot() {
   echo "boot_container=$container shutdown_seconds=$elapsed secret_scan=pass"
 }
 
-prepare_v3_database() {
+prepare_v4_database() {
   local local_volume="$1"
   docker run --rm --entrypoint node \
     -v "$local_volume:/var/lib/oloka" "$image" --input-type=module -e '
@@ -150,6 +150,7 @@ prepare_v3_database() {
       const v1 = readFileSync("/app/apps/server/migrations/0001-foundation-system-tables.sql");
       const v2 = readFileSync("/app/apps/server/migrations/0002-persistence-kernel.sql");
       const v3 = readFileSync("/app/apps/server/migrations/0003-identity-and-approval.sql");
+      const v4 = readFileSync("/app/apps/server/migrations/0004-canonical-project.sql");
       database.exec(v1.toString("utf8"));
       database.exec(v2.toString("utf8"));
       database.prepare(`INSERT INTO schema_migrations
@@ -166,6 +167,14 @@ prepare_v3_database() {
           "identity-and-approval",
           createHash("sha256").update(v3).digest("hex"),
           "slice-3b-docker-fixture",
+        );
+      database.exec(v4.toString("utf8"));
+      database.prepare(`INSERT INTO schema_migrations
+        (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+        VALUES (4, ?, ?, 4, 0, ?)`).run(
+          "canonical-project",
+          createHash("sha256").update(v4).digest("hex"),
+          "slice-3c-docker-fixture",
         );
       database.close();
     '
@@ -434,7 +443,7 @@ for boot in 1 2 3; do
   docker volume create "$local_volume" >/dev/null
   mode="restore-required"
   if [ "$boot" -eq 1 ]; then mode="fresh-if-replica-missing"; fi
-  if [ "$boot" -eq 1 ]; then prepare_v3_database "$local_volume"; fi
+  if [ "$boot" -eq 1 ]; then prepare_v4_database "$local_volume"; fi
   container="$(start_boot "$boot" "$mode" "$local_volume")"
   if [ "$boot" -eq 1 ]; then seed_identity_state "$container"; create_project_state "$container"; fi
   if [ "$boot" -eq 2 ]; then transition_member_state "$container"; soft_delete_project "$container"; fi
