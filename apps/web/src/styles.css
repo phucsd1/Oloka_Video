@@ -11,7 +11,8 @@ body {
   min-width: 320px;
 }
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 button,
@@ -153,6 +154,134 @@ h1 {
   font-size: 0.9rem;
   margin-top: 0.25rem;
 }
+.project-workspace {
+  display: grid;
+  gap: 1.25rem;
+}
+.project-create-panel {
+  background:
+    linear-gradient(120deg, rgba(11, 104, 91, 0.08), transparent 45%), white;
+  box-shadow: var(--shadow-card);
+  padding: 2rem;
+}
+.project-create-form,
+.project-edit-form {
+  display: grid;
+  gap: 1rem;
+}
+.project-create-form {
+  align-items: end;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) auto;
+}
+.project-create-form label,
+.project-edit-form label {
+  color: var(--color-muted);
+  display: grid;
+  font-size: 0.82rem;
+  font-weight: 750;
+  gap: 0.45rem;
+}
+.project-create-form label span {
+  font-weight: 500;
+}
+.project-create-form input,
+.project-create-form textarea,
+.project-edit-form input,
+.project-edit-form textarea {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  color: var(--color-ink);
+  min-height: 3rem;
+  padding: 0.72rem 0.82rem;
+  resize: vertical;
+}
+.project-create-form textarea {
+  max-height: 8rem;
+  min-height: 3rem;
+}
+.project-create-form input:focus-visible,
+.project-create-form textarea:focus-visible,
+.project-edit-form input:focus-visible,
+.project-edit-form textarea:focus-visible,
+.project-actions button:focus-visible {
+  outline: 3px solid rgba(11, 104, 91, 0.28);
+  outline-offset: 2px;
+}
+.project-list {
+  display: grid;
+  gap: 0.85rem;
+}
+.project-card {
+  align-items: center;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  gap: 1.5rem;
+  justify-content: space-between;
+  padding: 1.35rem 1.5rem;
+}
+.project-card h3,
+.trash-heading h2 {
+  letter-spacing: -0.025em;
+  margin: 0.25rem 0 0;
+}
+.project-card p {
+  color: var(--color-muted);
+  margin: 0.45rem 0;
+}
+.project-card small {
+  color: var(--color-muted);
+}
+.project-status {
+  color: var(--color-brand);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.project-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+.danger-action {
+  background: var(--color-danger-soft);
+  border: 1px solid #e9c7c1;
+  border-radius: 10px;
+  color: var(--color-danger);
+  cursor: pointer;
+  font-weight: 750;
+  padding: 0.78rem 1rem;
+}
+.project-empty-state {
+  border-style: dashed;
+  padding: 1.5rem;
+  text-align: center;
+}
+.project-empty-state p,
+.trash-empty {
+  color: var(--color-muted);
+}
+.trash-heading {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2rem;
+}
+.inline-notice,
+.inline-error {
+  border-radius: 10px;
+  margin: 0;
+  padding: 0.9rem 1rem;
+}
+.inline-notice {
+  background: var(--color-neutral-soft);
+  color: var(--color-ink);
+}
+.inline-error {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
 .dashboard-grid {
   display: grid;
   gap: 1.25rem;
@@ -259,6 +388,13 @@ footer span:first-child {
   }
   .dashboard-grid {
     grid-template-columns: 1fr;
+  }
+  .project-create-form {
+    grid-template-columns: 1fr;
+  }
+  .project-card {
+    align-items: stretch;
+    flex-direction: column;
   }
   .environment-label,
   footer span:last-child {

@@ -217,6 +217,13 @@ describe("identity HTTP routes", () => {
     expect(pendingGate.statusCode).toBe(403);
     expect(pendingGate.json().error.code).toBe("ACCOUNT_PENDING");
     expectCanonicalError(pendingGate, "ACCOUNT_PENDING");
+    const pendingProjectGate = await app.inject({
+      method: "GET",
+      url: "/api/v1/projects",
+      headers: { cookie: memberCookie },
+    });
+    expect(pendingProjectGate.statusCode).toBe(403);
+    expect(pendingProjectGate.json().error.code).toBe("ACCOUNT_PENDING");
 
     nextIdentity = {
       subject: "unverified-google-subject",
@@ -373,6 +380,171 @@ describe("identity HTTP routes", () => {
     });
     expect(memberDeniedAdmin.statusCode).toBe(403);
     expect(memberDeniedAdmin.json().error.code).toBe("AUTHORIZATION_DENIED");
+
+    const memberCsrf = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/csrf",
+      headers: { cookie: activeMemberCookie },
+    });
+    const createdProject = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: {
+        cookie: activeMemberCookie,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": memberCsrf.json().csrfToken as string,
+        "idempotency-key": "member-create-project-1",
+      },
+      payload: { name: "Dự án đầu tiên", description: "Canonical SQLite" },
+    });
+    expect(createdProject.statusCode, createdProject.body).toBe(201);
+    expect(createdProject.json()).toMatchObject({
+      name: "Dự án đầu tiên",
+      status: "active",
+      favorite: false,
+      version: 1,
+    });
+    const projectId = createdProject.json().id as string;
+    const replayedProject = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: {
+        cookie: activeMemberCookie,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": memberCsrf.json().csrfToken as string,
+        "idempotency-key": "member-create-project-1",
+      },
+      payload: { name: "Dự án đầu tiên", description: "Canonical SQLite" },
+    });
+    expect(replayedProject.statusCode).toBe(201);
+    expect(replayedProject.headers["idempotency-replayed"]).toBe("true");
+    expect(replayedProject.json().id).toBe(projectId);
+    const projectConflict = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: {
+        cookie: activeMemberCookie,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": memberCsrf.json().csrfToken as string,
+        "idempotency-key": "member-create-project-1",
+      },
+      payload: { name: "Changed semantic request" },
+    });
+    expect(projectConflict.statusCode).toBe(409);
+    expect(projectConflict.json().error.code).toBe("IDEMPOTENCY_CONFLICT");
+    const memberProjects = await app.inject({
+      method: "GET",
+      url: "/api/v1/projects",
+      headers: { cookie: activeMemberCookie },
+    });
+    expect(memberProjects.statusCode, memberProjects.body).toBe(200);
+    expect(memberProjects.json().projects).toHaveLength(1);
+    const adminCannotReadMemberProject = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/${projectId}`,
+      headers: { cookie: cookie.split(";")[0]! },
+    });
+    expect(adminCannotReadMemberProject.statusCode).toBe(404);
+    expect(adminCannotReadMemberProject.json().error.code).toBe(
+      "RESOURCE_NOT_FOUND",
+    );
+    const updatedProject = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/projects/${projectId}`,
+      headers: {
+        cookie: activeMemberCookie,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": memberCsrf.json().csrfToken as string,
+        "idempotency-key": "member-update-project-1",
+      },
+      payload: { name: "Dự án đã đổi tên", favorite: true, expectedVersion: 1 },
+    });
+    expect(updatedProject.statusCode, updatedProject.body).toBe(200);
+    expect(updatedProject.json()).toMatchObject({
+      id: projectId,
+      name: "Dự án đã đổi tên",
+      favorite: true,
+      version: 2,
+    });
+    const staleUpdate = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/projects/${projectId}`,
+      headers: {
+        cookie: activeMemberCookie,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": memberCsrf.json().csrfToken as string,
+        "idempotency-key": "member-update-project-stale",
+      },
+      payload: { description: "Stale", expectedVersion: 1 },
+    });
+    expect(staleUpdate.statusCode).toBe(409);
+    expect(staleUpdate.json().error.code).toBe("VERSION_CONFLICT");
+    const deletedProject = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/projects/${projectId}`,
+      headers: {
+        cookie: activeMemberCookie,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": memberCsrf.json().csrfToken as string,
+        "idempotency-key": "member-delete-project-1",
+      },
+      payload: { expectedVersion: 2 },
+    });
+    expect(deletedProject.statusCode, deletedProject.body).toBe(200);
+    expect(deletedProject.json()).toMatchObject({
+      status: "soft_deleted",
+      version: 3,
+    });
+    const activeAfterDelete = await app.inject({
+      method: "GET",
+      url: "/api/v1/projects",
+      headers: { cookie: activeMemberCookie },
+    });
+    expect(activeAfterDelete.json().projects).toEqual([]);
+    const trash = await app.inject({
+      method: "GET",
+      url: "/api/v1/trash/projects",
+      headers: { cookie: activeMemberCookie },
+    });
+    expect(trash.statusCode, trash.body).toBe(200);
+    expect(trash.json().projects).toHaveLength(1);
+    const crossUserRestore = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/restore`,
+      headers: {
+        cookie: cookie.split(";")[0]!,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": csrfToken,
+        "idempotency-key": "admin-cross-user-restore",
+      },
+      payload: { expectedVersion: 3 },
+    });
+    expect(crossUserRestore.statusCode).toBe(404);
+    const restoredProject = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/restore`,
+      headers: {
+        cookie: activeMemberCookie,
+        origin: "https://oloka.example.test",
+        "content-type": "application/json",
+        "x-oloka-csrf": memberCsrf.json().csrfToken as string,
+        "idempotency-key": "member-restore-project-1",
+      },
+      payload: { expectedVersion: 3 },
+    });
+    expect(restoredProject.statusCode, restoredProject.body).toBe(200);
+    expect(restoredProject.json()).toMatchObject({
+      id: projectId,
+      status: "active",
+      version: 4,
+    });
 
     nextIdentity = {
       subject: "google-subject-1",

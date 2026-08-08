@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("database migrations", () => {
-  it("preserves Slice 3A tables and adds only the Slice 3B tables", async () => {
+  it("preserves prior tables and adds only the Slice 3C Project table", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const database = await SqliteSystemDatabase.connect(
@@ -37,6 +37,7 @@ describe("database migrations", () => {
       "oauth_identities",
       "oauth_transactions",
       "outbox_events",
+      "projects",
       "provider_credential_references",
       "schema_migrations",
       "sessions",
@@ -52,7 +53,7 @@ describe("database migrations", () => {
           )
           .all(),
     ) as Array<Record<string, unknown>>;
-    expect(ledger).toHaveLength(3);
+    expect(ledger).toHaveLength(4);
     expect(ledger[0]).toMatchObject({
       version: 1,
       name: "foundation_system_tables",
@@ -84,10 +85,22 @@ describe("database migrations", () => {
         ),
       ),
     });
+    expect(ledger[3]).toMatchObject({
+      version: 4,
+      name: "canonical-project",
+      checksum_sha256: sha256Hex(
+        await readFile(
+          new URL(
+            "../../migrations/0004-canonical-project.sql",
+            import.meta.url,
+          ),
+        ),
+      ),
+    });
     await database.close();
   });
 
-  it("applies identity and approval migration v3 on a fresh database", async () => {
+  it("applies migrations v1 through v4 on a fresh database", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const database = await SqliteSystemDatabase.connect(
@@ -109,6 +122,7 @@ describe("database migrations", () => {
       { version: 1, name: "foundation_system_tables" },
       { version: 2, name: "persistence-kernel" },
       { version: 3, name: "identity-and-approval" },
+      { version: 4, name: "canonical-project" },
     ]);
     await database.close();
   });
@@ -186,8 +200,8 @@ describe("database migrations", () => {
     );
     expect(manifest).toMatchObject({
       sourceSchemaVersion: 1,
-      targetSchemaVersion: 3,
-      migrationVersionsPending: [2, 3],
+      targetSchemaVersion: 4,
+      migrationVersionsPending: [2, 3, 4],
       appBuildSha: "test-build",
     });
     await expect(
@@ -231,7 +245,7 @@ describe("database migrations", () => {
     await database.close();
   });
 
-  it("creates one verified v2-to-v3 backup and no new backup on restart", async () => {
+  it("creates one verified v2-to-v4 backup and no new backup on restart", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const databasePath = join(directory, "database.sqlite");
@@ -279,13 +293,160 @@ describe("database migrations", () => {
       ),
     ).resolves.toMatchObject({
       sourceSchemaVersion: 2,
-      targetSchemaVersion: 3,
-      migrationVersionsPending: [3],
+      targetSchemaVersion: 4,
+      migrationVersionsPending: [3, 4],
     });
     await database.migrate();
     expect(await readdir(join(backupRoot, "pre-migration"))).toEqual([
       "backup-v3-1",
     ]);
+    await database.close();
+  });
+
+  it("creates one verified exact-v3-to-v4 backup and applies v4 once", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-migration-v3-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "database.sqlite");
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(
+      await readFile(
+        new URL(
+          "../../migrations/0001-foundation-system-tables.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const v2Bytes = await readFile(
+      new URL("../../migrations/0002-persistence-kernel.sql", import.meta.url),
+    );
+    legacy.exec(v2Bytes.toString("utf8"));
+    legacy
+      .prepare(
+        `INSERT INTO schema_migrations
+          (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+         VALUES (2, 'persistence-kernel', ?, 2, 0, 'slice-3a1')`,
+      )
+      .run(sha256Hex(v2Bytes));
+    const v3Bytes = await readFile(
+      new URL(
+        "../../migrations/0003-identity-and-approval.sql",
+        import.meta.url,
+      ),
+    );
+    legacy.exec(v3Bytes.toString("utf8"));
+    legacy
+      .prepare(
+        `INSERT INTO schema_migrations
+          (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+         VALUES (3, 'identity-and-approval', ?, 3, 0, 'slice-3b')`,
+      )
+      .run(sha256Hex(v3Bytes));
+    legacy.close();
+    const backupRoot = join(directory, "backups");
+    const applicationKey = Buffer.alloc(32, 7);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(databasePath).href,
+      {
+        appKey: applicationKey,
+        backupRoot,
+        appBuildSha: "slice-3c",
+        idGenerator: { generate: () => "backup-v4-exact-v3" },
+      },
+    );
+
+    await database.migrate();
+
+    await expect(
+      verifyBackupDirectory(
+        join(backupRoot, "pre-migration", "backup-v4-exact-v3"),
+        applicationKey,
+      ),
+    ).resolves.toMatchObject({
+      sourceSchemaVersion: 3,
+      targetSchemaVersion: 4,
+      migrationVersionsPending: [4],
+    });
+    const beforeRestart = database.transactions.run("read", ({ database }) =>
+      database
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all(),
+    );
+    await database.migrate();
+    const afterRestart = database.transactions.run("read", ({ database }) =>
+      database
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all(),
+    );
+    expect(afterRestart).toEqual(beforeRestart);
+    expect(await readdir(join(backupRoot, "pre-migration"))).toEqual([
+      "backup-v4-exact-v3",
+    ]);
+    await database.close();
+  });
+
+  it("rolls back v4 when the migration SQL cannot create its table", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "oloka-migration-v4-failure-"),
+    );
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "database.sqlite");
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(
+      await readFile(
+        new URL(
+          "../../migrations/0001-foundation-system-tables.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    for (const [version, name, filename] of [
+      [2, "persistence-kernel", "0002-persistence-kernel.sql"],
+      [3, "identity-and-approval", "0003-identity-and-approval.sql"],
+    ] as const) {
+      const bytes = await readFile(
+        new URL(`../../migrations/${filename}`, import.meta.url),
+      );
+      legacy.exec(bytes.toString("utf8"));
+      legacy
+        .prepare(
+          `INSERT INTO schema_migrations
+            (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+           VALUES (?, ?, ?, ?, 0, 'rollback-fixture')`,
+        )
+        .run(version, name, sha256Hex(bytes), version);
+    }
+    legacy.exec("CREATE VIEW projects AS SELECT id FROM users");
+    legacy.close();
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(databasePath).href,
+      {
+        appKey: Buffer.alloc(32, 6),
+        backupRoot: join(directory, "backups"),
+        idGenerator: { generate: () => "backup-before-v4-failure" },
+      },
+    );
+
+    await expect(database.migrate()).rejects.toThrow(/already exists/i);
+
+    const state = database.transactions.run("read", ({ database }) => ({
+      versions: database
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .all()
+        .map((row) => (row as { version: number }).version),
+      projectObject: database
+        .prepare("SELECT type FROM sqlite_schema WHERE name = 'projects'")
+        .get(),
+      projectIndexes: database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE name LIKE 'projects_%_idx'",
+        )
+        .all(),
+    }));
+    expect(state.versions).toEqual([1, 2, 3]);
+    expect(state.projectObject).toEqual({ type: "view" });
+    expect(state.projectIndexes).toEqual([]);
     await database.close();
   });
 

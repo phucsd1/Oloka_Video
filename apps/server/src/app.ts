@@ -15,12 +15,15 @@ import { ReadinessService } from "./system/readiness-service.js";
 import { VersionService } from "./system/version-service.js";
 import { RuntimeWitnessService } from "./system/runtime-witness-service.js";
 import { SystemClock } from "./kernel/clock.js";
+import { UuidIdGenerator } from "./kernel/id-generator.js";
 import { OperationalMetrics } from "./observability/operational-metrics.js";
 import { registerIdentityRoutes } from "./identity/identity-routes.js";
 import type { OidcProviderClient } from "./identity/oidc-provider-client.js";
 import { IdentityMaintenanceService } from "./identity/identity-maintenance-service.js";
 import { registerErrorHandler } from "./http/error-handler.js";
 import { ApplicationError } from "./http/application-error.js";
+import { ProjectService } from "./project/project-service.js";
+import { registerProjectRoutes } from "./project/project-routes.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -87,13 +90,28 @@ export async function buildApplication(
     versionResponseSchema.parse(new VersionService(environment).getVersion()),
   );
 
-  registerIdentityRoutes({
+  const identityService = registerIdentityRoutes({
     app,
     database,
     environment,
     ...(options.oidcClient === undefined
       ? {}
       : { oidcClient: options.oidcClient }),
+  });
+  const projectService =
+    environment.appKey === undefined
+      ? undefined
+      : new ProjectService({
+          transactions: database.transactions,
+          applicationKey: environment.appKey,
+          clock: new SystemClock(),
+          idGenerator: new UuidIdGenerator(),
+        });
+  registerProjectRoutes({
+    app,
+    identityService,
+    projectService,
+    publicOrigin: environment.identity?.publicOrigin,
   });
   const identityMaintenance = new IdentityMaintenanceService(
     database.transactions,

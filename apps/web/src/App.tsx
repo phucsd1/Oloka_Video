@@ -3,10 +3,14 @@ import {
   authSessionResponseSchema,
   csrfResponseSchema,
   errorEnvelopeSchema,
+  projectListResponseSchema,
+  projectSchema,
   type IdentityUser,
+  type Project,
 } from "@oloka/contracts";
 import { Surface } from "@oloka/design-system";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { FormEvent } from "react";
 
 type AppState =
   | { kind: "loading" }
@@ -34,6 +38,34 @@ class ApiError extends Error {
 async function getJson(path: string): Promise<unknown> {
   const response = await fetch(path, {
     headers: { accept: "application/json" },
+  });
+  if (!response.ok) {
+    const envelope = errorEnvelopeSchema.parse(await response.json());
+    throw new ApiError(
+      envelope.error.code,
+      envelope.error.messageKey,
+      envelope.error.suggestedAction,
+      envelope.error.requestId,
+    );
+  }
+  return response.json();
+}
+
+async function mutateJson(
+  path: string,
+  method: "POST" | "PATCH" | "DELETE",
+  body: unknown,
+  getCsrfToken: () => Promise<string>,
+): Promise<unknown> {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "x-oloka-csrf": await getCsrfToken(),
+      "idempotency-key": crypto.randomUUID(),
+    },
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     const envelope = errorEnvelopeSchema.parse(await response.json());
@@ -165,7 +197,7 @@ export function App() {
 
       <footer>
         <span>Oloka Video</span>
-        <span>Identity and approval foundation</span>
+        <span>Canonical Project lifecycle</span>
       </footer>
     </main>
   );
@@ -281,7 +313,8 @@ function ActiveState(props: {
           <p className="eyebrow">Approved account</p>
           <h1>Welcome, {props.user.displayName}.</h1>
           <p className="hero-copy">
-            Identity is active. Project creation begins in a later slice.
+            Create and organize private video projects. Project metadata stays
+            canonical in SQLite and can be restored from trash for 30 days.
           </p>
         </div>
         <button
@@ -291,10 +324,316 @@ function ActiveState(props: {
           Sign out
         </button>
       </section>
+      <ProjectWorkspace getCsrfToken={props.getCsrfToken} />
       {props.user.role === "admin" && (
         <AdminApprovalPanel getCsrfToken={props.getCsrfToken} />
       )}
     </div>
+  );
+}
+
+function ProjectWorkspace(props: { getCsrfToken: () => Promise<string> }) {
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [trash, setTrash] = useState<Project[] | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [versionConflict, setVersionConflict] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [activeResult, trashResult] = await Promise.all([
+        getJson("/api/v1/projects"),
+        getJson("/api/v1/trash/projects"),
+      ]);
+      setProjects(projectListResponseSchema.parse(activeResult).projects);
+      setTrash(projectListResponseSchema.parse(trashResult).projects);
+      setError(null);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Project list failed",
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const runMutation = useCallback(
+    async (operation: () => Promise<unknown>) => {
+      setBusy(true);
+      setVersionConflict(false);
+      try {
+        await operation();
+        await refresh();
+        setError(null);
+      } catch (reason) {
+        if (reason instanceof ApiError && reason.code === "VERSION_CONFLICT") {
+          setVersionConflict(true);
+          await refresh();
+        } else {
+          setError(
+            reason instanceof Error ? reason.message : "Project action failed",
+          );
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh],
+  );
+
+  const createProject = async (event: FormEvent) => {
+    event.preventDefault();
+    await runMutation(async () => {
+      projectSchema.parse(
+        await mutateJson(
+          "/api/v1/projects",
+          "POST",
+          { name, ...(description.trim() === "" ? {} : { description }) },
+          props.getCsrfToken,
+        ),
+      );
+      setName("");
+      setDescription("");
+    });
+  };
+
+  return (
+    <section className="project-workspace" aria-labelledby="projects-title">
+      <Surface className="project-create-panel">
+        <div className="card-heading">
+          <div>
+            <p className="eyebrow">Project library</p>
+            <h2 id="projects-title">Your projects</h2>
+          </div>
+          <button className="secondary-action" onClick={() => void refresh()}>
+            Refresh
+          </button>
+        </div>
+        <form
+          className="project-create-form"
+          onSubmit={(event) => void createProject(event)}
+        >
+          <label>
+            Project name
+            <input
+              required
+              maxLength={200}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Campaign or video name"
+            />
+          </label>
+          <label>
+            Description <span>optional</span>
+            <textarea
+              maxLength={2000}
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="A short note about this project"
+            />
+          </label>
+          <button
+            className="primary-action"
+            disabled={busy || name.trim() === ""}
+          >
+            Create project
+          </button>
+        </form>
+      </Surface>
+
+      {versionConflict && (
+        <p className="inline-notice" role="alert">
+          This project changed elsewhere. The latest version is now loaded.
+        </p>
+      )}
+      {error !== null && (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      )}
+      {projects === null && error === null && (
+        <p aria-live="polite">Loading projects…</p>
+      )}
+      {projects?.length === 0 && (
+        <Surface className="project-empty-state">
+          <strong>No projects yet</strong>
+          <p>
+            Create the first canonical project above. No demo data is added.
+          </p>
+        </Surface>
+      )}
+      <div className="project-list">
+        {projects?.map((project) => (
+          <ProjectCard
+            key={project.id}
+            project={project}
+            busy={busy}
+            onMutate={runMutation}
+            getCsrfToken={props.getCsrfToken}
+          />
+        ))}
+      </div>
+
+      <div className="trash-heading">
+        <div>
+          <p className="eyebrow">30-day retention</p>
+          <h2>Trash</h2>
+        </div>
+      </div>
+      {trash === null && error === null && (
+        <p aria-live="polite">Loading trash…</p>
+      )}
+      {trash?.length === 0 && <p className="trash-empty">Trash is empty</p>}
+      <div className="project-list trash-list">
+        {trash?.map((project) => (
+          <Surface className="project-card" key={project.id}>
+            <div>
+              <span className="project-status">Soft deleted</span>
+              <h3>{project.name}</h3>
+              <p>{project.description ?? "No description"}</p>
+            </div>
+            <button
+              className="secondary-action"
+              disabled={busy}
+              onClick={() =>
+                void runMutation(() =>
+                  mutateJson(
+                    `/api/v1/projects/${project.id}/restore`,
+                    "POST",
+                    { expectedVersion: project.version },
+                    props.getCsrfToken,
+                  ),
+                )
+              }
+            >
+              Restore
+            </button>
+          </Surface>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ProjectCard(props: {
+  project: Project;
+  busy: boolean;
+  getCsrfToken: () => Promise<string>;
+  onMutate: (operation: () => Promise<unknown>) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(props.project.name);
+  const [description, setDescription] = useState(
+    props.project.description ?? "",
+  );
+
+  useEffect(() => {
+    setName(props.project.name);
+    setDescription(props.project.description ?? "");
+  }, [props.project]);
+
+  const update = (body: Record<string, unknown>) =>
+    props.onMutate(() =>
+      mutateJson(
+        `/api/v1/projects/${props.project.id}`,
+        "PATCH",
+        { ...body, expectedVersion: props.project.version },
+        props.getCsrfToken,
+      ),
+    );
+
+  return (
+    <Surface className="project-card">
+      {editing ? (
+        <form
+          className="project-edit-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void update({
+              name,
+              description: description.trim() === "" ? null : description,
+            }).then(() => setEditing(false));
+          }}
+        >
+          <label>
+            Name
+            <input
+              required
+              maxLength={200}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <label>
+            Description
+            <textarea
+              maxLength={2000}
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </label>
+          <div className="project-actions">
+            <button className="primary-action" disabled={props.busy}>
+              Save
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => setEditing(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <>
+          <div>
+            <span className="project-status">
+              {props.project.favorite ? "Favorite" : "Active"}
+            </span>
+            <h3>{props.project.name}</h3>
+            <p>{props.project.description ?? "No description"}</p>
+            <small>Version {props.project.version}</small>
+          </div>
+          <div className="project-actions">
+            <button
+              className="secondary-action"
+              disabled={props.busy}
+              onClick={() => void update({ favorite: !props.project.favorite })}
+            >
+              {props.project.favorite ? "Unfavorite" : "Favorite"}
+            </button>
+            <button
+              className="secondary-action"
+              disabled={props.busy}
+              onClick={() => setEditing(true)}
+            >
+              Edit
+            </button>
+            <button
+              className="danger-action"
+              disabled={props.busy}
+              onClick={() =>
+                void props.onMutate(() =>
+                  mutateJson(
+                    `/api/v1/projects/${props.project.id}`,
+                    "DELETE",
+                    { expectedVersion: props.project.version },
+                    props.getCsrfToken,
+                  ),
+                )
+              }
+            >
+              Move to trash
+            </button>
+          </div>
+        </>
+      )}
+    </Surface>
   );
 }
 

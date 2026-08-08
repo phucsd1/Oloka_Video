@@ -1,7 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 import { join } from "node:path";
 
-const dataDir = join(process.cwd(), ".tmp", "playwright-data");
+const dataDir = join(
+  process.cwd(),
+  ".tmp",
+  "playwright-data",
+  `${process.pid}-${Date.now()}`,
+);
 
 export default defineConfig({
   testDir: "./tests/e2e",
