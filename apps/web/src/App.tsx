@@ -1,10 +1,14 @@
 import {
   adminUsersResponseSchema,
+  assetListResponseSchema,
+  assetSchema,
   authSessionResponseSchema,
   csrfResponseSchema,
   errorEnvelopeSchema,
   projectListResponseSchema,
   projectSchema,
+  uploadSessionSchema,
+  type Asset,
   type IdentityUser,
   type Project,
 } from "@oloka/contracts";
@@ -547,94 +551,371 @@ function ProjectCard(props: {
     );
 
   return (
-    <Surface className="project-card">
-      {editing ? (
-        <form
-          className="project-edit-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void update({
-              name,
-              description: description.trim() === "" ? null : description,
-            }).then(() => setEditing(false));
-          }}
-        >
-          <label>
-            Name
-            <input
-              required
-              maxLength={200}
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-          <label>
-            Description
-            <textarea
-              maxLength={2000}
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-            />
-          </label>
-          <div className="project-actions">
-            <button className="primary-action" disabled={props.busy}>
-              Save
-            </button>
-            <button
-              type="button"
-              className="secondary-action"
-              onClick={() => setEditing(false)}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      ) : (
-        <>
-          <div>
-            <span className="project-status">
-              {props.project.favorite ? "Favorite" : "Active"}
-            </span>
-            <h3>{props.project.name}</h3>
-            <p>{props.project.description ?? "No description"}</p>
-            <small>Version {props.project.version}</small>
-          </div>
-          <div className="project-actions">
-            <button
-              className="secondary-action"
-              disabled={props.busy}
-              onClick={() => void update({ favorite: !props.project.favorite })}
-            >
-              {props.project.favorite ? "Unfavorite" : "Favorite"}
-            </button>
-            <button
-              className="secondary-action"
-              disabled={props.busy}
-              onClick={() => setEditing(true)}
-            >
-              Edit
-            </button>
-            <button
-              className="danger-action"
-              disabled={props.busy}
-              onClick={() =>
-                void props.onMutate(() =>
-                  mutateJson(
-                    `/api/v1/projects/${props.project.id}`,
-                    "DELETE",
-                    { expectedVersion: props.project.version },
-                    props.getCsrfToken,
-                  ),
-                )
-              }
-            >
-              Move to trash
-            </button>
-          </div>
-        </>
+    <div className="project-with-assets">
+      <Surface className="project-card">
+        {editing ? (
+          <form
+            className="project-edit-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void update({
+                name,
+                description: description.trim() === "" ? null : description,
+              }).then(() => setEditing(false));
+            }}
+          >
+            <label>
+              Name
+              <input
+                required
+                maxLength={200}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </label>
+            <label>
+              Description
+              <textarea
+                maxLength={2000}
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+              />
+            </label>
+            <div className="project-actions">
+              <button className="primary-action" disabled={props.busy}>
+                Save
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => setEditing(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <div>
+              <span className="project-status">
+                {props.project.favorite ? "Favorite" : "Active"}
+              </span>
+              <h3>{props.project.name}</h3>
+              <p>{props.project.description ?? "No description"}</p>
+              <small>Version {props.project.version}</small>
+            </div>
+            <div className="project-actions">
+              <button
+                className="secondary-action"
+                disabled={props.busy}
+                onClick={() =>
+                  void update({ favorite: !props.project.favorite })
+                }
+              >
+                {props.project.favorite ? "Unfavorite" : "Favorite"}
+              </button>
+              <button
+                className="secondary-action"
+                disabled={props.busy}
+                onClick={() => setEditing(true)}
+              >
+                Edit
+              </button>
+              <button
+                className="danger-action"
+                disabled={props.busy}
+                onClick={() =>
+                  void props.onMutate(() =>
+                    mutateJson(
+                      `/api/v1/projects/${props.project.id}`,
+                      "DELETE",
+                      { expectedVersion: props.project.version },
+                      props.getCsrfToken,
+                    ),
+                  )
+                }
+              >
+                Move to trash
+              </button>
+            </div>
+          </>
+        )}
+      </Surface>
+      {!editing && (
+        <AssetWorkspace
+          project={props.project}
+          getCsrfToken={props.getCsrfToken}
+        />
       )}
+    </div>
+  );
+}
+
+function AssetWorkspace(props: {
+  project: Project;
+  getCsrfToken: () => Promise<string>;
+}) {
+  const [assets, setAssets] = useState<Asset[] | null>(null);
+  const [search, setSearch] = useState("");
+  const [progress, setProgress] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const query =
+      search.trim() === "" ? "" : `?search=${encodeURIComponent(search)}`;
+    try {
+      const result = assetListResponseSchema.parse(
+        await getJson(`/api/v1/projects/${props.project.id}/assets${query}`),
+      );
+      setAssets(result.assets);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Asset list failed");
+    }
+  }, [props.project.id, search]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    setProgress(0);
+    setError(null);
+    try {
+      const resumeKey = `oloka-upload:${props.project.id}:${file.name}:${file.size}`;
+      let uploadId = localStorage.getItem(resumeKey);
+      let assetId: string | undefined;
+      if (uploadId === null) {
+        const initialized = (await mutateJson(
+          `/api/v1/projects/${props.project.id}/uploads`,
+          "POST",
+          {
+            originalFilename: file.name,
+            kind: inferAssetKind(file),
+            ...(file.type === "" ? {} : { declaredMime: file.type }),
+            declaredSize: file.size,
+          },
+          props.getCsrfToken,
+        )) as { asset: unknown; upload: unknown };
+        assetId = assetSchema.parse(initialized.asset).id;
+        uploadId = uploadSessionSchema.parse(initialized.upload).uploadId;
+        localStorage.setItem(resumeKey, uploadId);
+      }
+      const head = await fetch(`/api/v1/uploads/${uploadId}`, {
+        method: "HEAD",
+      });
+      if (!head.ok) throw new Error(`Upload status returned ${head.status}`);
+      let offset = Number(head.headers.get("upload-offset") ?? "0");
+      const chunkSize = Math.min(
+        8 * 1024 * 1024,
+        Number(head.headers.get("upload-chunk-size") ?? 8 * 1024 * 1024),
+      );
+      while (offset < file.size) {
+        const bytes = new Uint8Array(
+          await file.slice(offset, offset + chunkSize).arrayBuffer(),
+        );
+        const response = await fetch(`/api/v1/uploads/${uploadId}`, {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/offset+octet-stream",
+            "upload-offset": String(offset),
+            "upload-chunk-sha256": await sha256Hex(bytes),
+            "x-oloka-csrf": await props.getCsrfToken(),
+          },
+          body: bytes,
+        });
+        if (!response.ok) throw await apiError(response);
+        offset = Number(
+          response.headers.get("upload-offset") ?? offset + bytes.byteLength,
+        );
+        setProgress(Math.round((offset / file.size) * 100));
+      }
+      const completed = assetSchema.parse(
+        await mutateJson(
+          `/api/v1/uploads/${uploadId}/complete`,
+          "POST",
+          {},
+          props.getCsrfToken,
+        ),
+      );
+      assetId ??= completed.id;
+      localStorage.removeItem(resumeKey);
+      setProgress(100);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Upload failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeAsset = async (asset: Asset) => {
+    setBusy(true);
+    try {
+      await mutateJson(
+        `/api/v1/assets/${asset.id}`,
+        "DELETE",
+        { expectedVersion: asset.version },
+        props.getCsrfToken,
+      );
+      await refresh();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Asset delete failed",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Surface className="asset-workspace">
+      <div className="asset-toolbar">
+        <div>
+          <p className="eyebrow">Private media</p>
+          <h4>Assets</h4>
+        </div>
+        <label className="upload-button">
+          Upload file
+          <input
+            type="file"
+            disabled={busy}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file !== undefined) void upload(file);
+              event.currentTarget.value = "";
+            }}
+          />
+        </label>
+      </div>
+      <div className="asset-search-row">
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search original filename"
+          aria-label={`Search assets in ${props.project.name}`}
+        />
+        <button className="secondary-action" onClick={() => void refresh()}>
+          Search
+        </button>
+      </div>
+      {progress !== null && progress < 100 && (
+        <div className="upload-progress" aria-live="polite">
+          <span style={{ width: `${progress}%` }} />
+          <small>{progress}% uploaded</small>
+        </div>
+      )}
+      {error !== null && <p className="inline-error">{error}</p>}
+      {assets === null && error === null && <p>Loading assets…</p>}
+      {assets?.length === 0 && (
+        <p className="asset-empty">No private media yet.</p>
+      )}
+      <div className="asset-grid">
+        {assets?.map((asset) => (
+          <AssetCard
+            key={asset.id}
+            asset={asset}
+            busy={busy}
+            onDelete={() => void removeAsset(asset)}
+          />
+        ))}
+      </div>
     </Surface>
   );
+}
+
+function AssetCard(props: {
+  asset: Asset;
+  busy: boolean;
+  onDelete: () => void;
+}) {
+  const contentUrl = `/api/v1/assets/${props.asset.id}/content`;
+  return (
+    <article className="asset-card">
+      <div className="asset-preview">
+        {props.asset.ingestionStatus === "ready" &&
+          props.asset.kind === "image" && (
+            <img
+              src={contentUrl}
+              alt={props.asset.originalFilename}
+              loading="lazy"
+            />
+          )}
+        {props.asset.ingestionStatus === "ready" &&
+          props.asset.kind === "video" && (
+            <video controls preload="metadata" src={contentUrl} />
+          )}
+        {props.asset.ingestionStatus === "ready" &&
+          props.asset.kind === "audio" && (
+            <audio controls preload="metadata" src={contentUrl} />
+          )}
+        {(props.asset.kind === "font" ||
+          props.asset.ingestionStatus !== "ready") && (
+          <span>{props.asset.ingestionStatus}</span>
+        )}
+      </div>
+      <strong title={props.asset.originalFilename}>
+        {props.asset.originalFilename}
+      </strong>
+      <small>
+        {props.asset.kind} · {formatBytes(props.asset.byteSize)} ·{" "}
+        {props.asset.ingestionStatus}
+      </small>
+      <div className="asset-actions">
+        {props.asset.ingestionStatus === "ready" && (
+          <a
+            className="secondary-action"
+            href={contentUrl}
+            download={props.asset.originalFilename}
+          >
+            Download
+          </a>
+        )}
+        <button
+          className="danger-action"
+          disabled={props.busy}
+          onClick={props.onDelete}
+        >
+          Delete
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function inferAssetKind(file: File): "image" | "video" | "audio" | "font" {
+  if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("video/")) return "video";
+  if (file.type.startsWith("audio/")) return "audio";
+  return "font";
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", copy.buffer);
+  return Array.from(new Uint8Array(digest), (value) =>
+    value.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+async function apiError(response: Response): Promise<ApiError> {
+  const envelope = errorEnvelopeSchema.parse(await response.json());
+  return new ApiError(
+    envelope.error.code,
+    envelope.error.messageKey,
+    envelope.error.suggestedAction,
+    envelope.error.requestId,
+  );
+}
+
+function formatBytes(value: number | null): string {
+  if (value === null) return "pending";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function AdminApprovalPanel(props: { getCsrfToken: () => Promise<string> }) {

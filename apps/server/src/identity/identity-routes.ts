@@ -378,8 +378,16 @@ export function verifyProtectedCsrfRequest(
   session: AuthenticatedSession,
   request: FastifyRequest,
   publicOrigin: string | undefined,
+  allowedContentTypes: readonly string[] = ["application/json"],
 ): void {
-  verifyCsrfRequest(service, session, request, publicOrigin, undefined);
+  verifyCsrfRequest(
+    service,
+    session,
+    request,
+    publicOrigin,
+    undefined,
+    allowedContentTypes,
+  );
 }
 
 function requireAdmin(
@@ -404,6 +412,7 @@ function verifyCsrfRequest(
   request: FastifyRequest,
   publicOrigin: string | undefined,
   limiter: BoundedIdentityRateLimiter | undefined,
+  allowedContentTypes: readonly string[] = ["application/json"],
 ): void {
   let failureCategory: string | undefined;
   const origin = request.headers.origin;
@@ -422,7 +431,9 @@ function verifyCsrfRequest(
   if (
     failureCategory === undefined &&
     (typeof contentType !== "string" ||
-      !contentType.toLowerCase().startsWith("application/json"))
+      !allowedContentTypes.some((allowed) =>
+        contentType.toLowerCase().startsWith(allowed),
+      ))
   ) {
     failureCategory = "content_type";
   }

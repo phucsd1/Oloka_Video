@@ -1,6 +1,6 @@
 # Phase 3 Implementation Sequence
 
-Status: Slice 3A.1 durability and Slice 3B identity/approval production cutovers are closed. Slice 3C is implementation in review with production cutover pending. Later slices require explicit authorization.
+Status: Slice 3A.1, Slice 3B, and Slice 3C production cutovers are closed. Slice 3D is implementation in review with production cutover pending. Later slices require explicit authorization.
 
 ## 3A — Persistence kernel
 
@@ -47,9 +47,12 @@ Implementation status: complete, merged, and production cutover closed. See `PHA
 
 ## 3C — Canonical Project
 
-Implementation status: implementation in review on
-`codex/phase3c-canonical-project`; production cutover pending. See
+Implementation status: complete, merged, and production cutover closed. See
 `PHASE3C_CANONICAL_PROJECT.md`.
+
+Production evidence: merge SHA
+`ad652d80ea864c39a7d47a3cff9126c258b7267f`, schema v4, and the canonical
+Project lifecycle verified across one normal Hugging Face Space restart.
 
 - Modules/files: Project contracts/repository/service/routes, Project list/trash queries, owner authorization, 30-day restore policy, and minimal owner UI.
 - Schema/migration: v4 projects with ownership/lifecycle/list/retention indexes; quota policy/reservation implementation remains deferred until explicitly authorized.
@@ -60,6 +63,10 @@ Implementation status: implementation in review on
 - Exit criteria: all AC-PROJ, Project-related AC-AUTHZ/RET/QUOTA, and list NFR fixture targets pass.
 
 ## 3D — Private Assets
+
+Implementation status: in review on `codex/phase3d-private-assets`; production
+cutover pending. No production migration or media upload is authorized by this
+status.
 
 - Modules/files: filesystem object adapter, Asset/UploadSession repositories/services/routes, raw chunk streaming, ingestion adapter/job admission shim, basic metadata/search, Range/capability delivery, cleanup/reconciliation.
 - Schema/migration: v5 assets, upload sessions, delivery capabilities and containment/search/expiry indexes.

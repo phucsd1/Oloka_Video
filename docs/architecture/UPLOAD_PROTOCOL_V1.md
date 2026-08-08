@@ -1,5 +1,7 @@
 # Upload Protocol V1
 
+Status: Slice 3D implementation in review; production cutover pending.
+
 ## Decision
 
 Oloka implements an application-managed resumable protocol; tus is not an MVP dependency. Chunks are sequential, default/max chunk size is 8 MiB, and the server is the offset authority. The asset-size ceiling and user/project storage admission come from `QuotaPolicy`, not constants in the browser.

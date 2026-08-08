@@ -36,6 +36,16 @@ owner list order `favorite DESC, updated_at DESC, id DESC`. Slice 3C does not
 implement purge scheduling/worker side effects despite the later-state schema
 foundation.
 
+### Slice 3D Asset projection
+
+Owner Asset responses expose only the resource/project IDs, normalized original
+filename, kind, declared/verified MIME, immutable byte size/checksum, bounded
+technical metadata, ingestion/lifecycle status, safe failure code, timestamps,
+and optimistic version. They never expose owner columns, storage/staging keys,
+filesystem paths, reconciliation state, or capability hashes. Upload responses
+expose the UploadSession ID, Asset ID, canonical received offset, declared
+length, lifecycle status, expiry, and recommended chunk size only.
+
 ## Common errors
 
 The stable code, status, retryability, message key, action, severity, and allowed

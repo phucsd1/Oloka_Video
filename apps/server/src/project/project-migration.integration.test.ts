@@ -16,7 +16,7 @@ afterEach(async () => {
 });
 
 describe("Project migration v4", () => {
-  it("migrates an empty database through ledger versions 1, 2, 3, and 4", async () => {
+  it("keeps the Project migration applied under the current schema", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-project-v4-"));
     temporaryDirectories.push(directory);
     const database = await SqliteSystemDatabase.connect(
@@ -33,7 +33,7 @@ describe("Project migration v4", () => {
           .all()
           .map((row) => (row as { version: number }).version),
       );
-      expect(versions).toEqual([1, 2, 3, 4]);
+      expect(versions).toEqual([1, 2, 3, 4, 5]);
       expect(database.listApplicationTables()).toContain("projects");
       await expect(database.checkReadiness()).resolves.toEqual({
         status: "ready",

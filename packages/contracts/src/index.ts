@@ -156,6 +156,130 @@ export const projectListResponseSchema = z
 
 export const trashProjectListResponseSchema = projectListResponseSchema;
 
+export const assetKindSchema = z.enum(["image", "video", "audio", "font"]);
+export const assetIngestionStatusSchema = z.enum([
+  "upload_pending",
+  "uploading",
+  "processing",
+  "ready",
+  "failed",
+]);
+export const assetLifecycleStatusSchema = z.enum([
+  "active",
+  "soft_deleted",
+  "purge_scheduled",
+  "purging",
+  "purged",
+]);
+export const uploadSessionStatusSchema = z.enum([
+  "open",
+  "verifying",
+  "completed",
+  "aborted",
+  "expired",
+  "rejected",
+]);
+export const deliveryOperationSchema = z.enum([
+  "stream",
+  "preview",
+  "download",
+]);
+export const assetMetadataSchema = z.record(
+  z.string().max(64),
+  z.union([z.string().max(256), z.number().finite(), z.boolean()]),
+);
+
+const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const filenameSchema = z.string().trim().min(1).max(255);
+
+export const assetSchema = z
+  .object({
+    id: z.uuid(),
+    projectId: z.uuid(),
+    originalFilename: filenameSchema,
+    kind: assetKindSchema,
+    declaredMime: z.string().max(127).nullable(),
+    verifiedMime: z.string().max(127).nullable(),
+    byteSize: z.number().int().nonnegative().nullable(),
+    byteChecksumSha256: sha256Schema.nullable(),
+    metadata: assetMetadataSchema.nullable(),
+    ingestionStatus: assetIngestionStatusSchema,
+    lifecycleStatus: assetLifecycleStatusSchema,
+    failureCode: z.string().max(100).nullable(),
+    createdAt: utcTimestampSchema,
+    updatedAt: utcTimestampSchema,
+    deletedAt: utcTimestampSchema.nullable(),
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+export const assetListQuerySchema = z
+  .object({
+    cursor: opaqueCursorSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(25),
+    kind: assetKindSchema.optional(),
+    ingestionStatus: assetIngestionStatusSchema.optional(),
+    lifecycleStatus: assetLifecycleStatusSchema.optional(),
+    search: z.string().trim().max(100).optional(),
+    uploadedAfter: z.coerce.number().int().nonnegative().optional(),
+    uploadedBefore: z.coerce.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const assetListResponseSchema = z
+  .object({
+    assets: z.array(assetSchema).max(100),
+    nextCursor: opaqueCursorSchema.nullable(),
+  })
+  .strict();
+
+export const initializeUploadRequestSchema = z
+  .object({
+    originalFilename: filenameSchema,
+    kind: assetKindSchema,
+    declaredMime: z.string().trim().min(1).max(127).optional(),
+    declaredSize: z.number().int().positive(),
+    declaredChecksumSha256: sha256Schema.optional(),
+  })
+  .strict();
+
+export const uploadSessionSchema = z
+  .object({
+    uploadId: z.uuid(),
+    assetId: z.uuid(),
+    projectId: z.uuid(),
+    originalFilename: filenameSchema,
+    kind: assetKindSchema,
+    declaredMime: z.string().max(127).nullable(),
+    declaredSize: z.number().int().positive(),
+    receivedSize: z.number().int().nonnegative(),
+    status: uploadSessionStatusSchema,
+    expiresAt: utcTimestampSchema,
+    recommendedChunkSize: z.literal(8 * 1024 * 1024),
+  })
+  .strict();
+
+export const uploadCompleteRequestSchema = z
+  .object({ declaredChecksumSha256: sha256Schema.optional() })
+  .strict();
+
+export const assetMutationRequestSchema = z
+  .object({ expectedVersion: z.number().int().positive() })
+  .strict();
+
+export const deliveryCapabilityRequestSchema = z
+  .object({ operation: deliveryOperationSchema })
+  .strict();
+
+export const deliveryCapabilityResponseSchema = z
+  .object({
+    capability: z.string().min(32).max(256),
+    expiresAt: utcTimestampSchema,
+    operation: deliveryOperationSchema,
+    assetId: z.uuid(),
+  })
+  .strict();
+
 export const adminUsersQuerySchema = z
   .object({
     status: userStatusSchema.optional(),
@@ -255,6 +379,21 @@ export type UpdateProjectRequest = z.infer<typeof updateProjectRequestSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
 export type TrashProjectListResponse = z.infer<
   typeof trashProjectListResponseSchema
+>;
+export type Asset = z.infer<typeof assetSchema>;
+export type AssetListResponse = z.infer<typeof assetListResponseSchema>;
+export type AssetListQuery = z.infer<typeof assetListQuerySchema>;
+export type InitializeUploadRequest = z.infer<
+  typeof initializeUploadRequestSchema
+>;
+export type UploadSession = z.infer<typeof uploadSessionSchema>;
+export type UploadCompleteRequest = z.infer<typeof uploadCompleteRequestSchema>;
+export type AssetMutationRequest = z.infer<typeof assetMutationRequestSchema>;
+export type DeliveryCapabilityRequest = z.infer<
+  typeof deliveryCapabilityRequestSchema
+>;
+export type DeliveryCapabilityResponse = z.infer<
+  typeof deliveryCapabilityResponseSchema
 >;
 export type PublicErrorCode = z.infer<typeof publicErrorCodeSchema>;
 export type AdminUserTransitionRequest = z.infer<

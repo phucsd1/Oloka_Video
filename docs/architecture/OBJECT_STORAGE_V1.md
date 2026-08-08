@@ -1,5 +1,7 @@
 # Object Storage V1
 
+Status: Slice 3D implementation in review; production cutover pending.
+
 ## Scope
 
 The MVP object adapter stores durable bytes beneath `OBJECT_STORAGE_ROOT` (production `/data`) and temporary upload bytes beneath its staging area. Runtime bytes are never written to Git and are not served by a public static mount. The live SQLite primary is explicitly outside this root at `/var/lib/oloka/database/oloka.db`; `/data/database/oloka-dev.db` is legacy evidence only.

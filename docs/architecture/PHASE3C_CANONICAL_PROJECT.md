@@ -1,6 +1,10 @@
 # Phase 3C Canonical Project
 
-Status: implementation in review; production cutover pending.
+Status: implemented, merged, and production cutover complete.
+
+Production evidence: merge SHA
+`ad652d80ea864c39a7d47a3cff9126c258b7267f`, production schema v4, and Project
+durability verified across one normal Hugging Face Space restart.
 
 ## Scope
 
@@ -9,9 +13,9 @@ Project lifecycle. An authenticated active member or admin can create, list,
 read, update presentation metadata, favorite, soft-delete, list trash, and
 restore an owned Project. Admin role does not bypass ownership.
 
-The implementation intentionally excludes Asset/upload, Job/worker, queue,
-Composition, HyperFrames, preview, provider, render, and purge-worker behavior.
-No production deployment or migration v4 cutover is part of this review.
+The Phase 3C implementation intentionally excluded Asset/upload, Job/worker,
+queue, Composition, HyperFrames, preview, provider, render, and purge-worker
+behavior. Those boundaries remain historical evidence for the completed slice.
 
 ## Migration v4
 
@@ -83,9 +87,9 @@ create, edit/rename, favorite/unfavorite, move-to-trash, and restore actions.
 It includes loading, empty, request error, version-conflict, and account-status
 states without demo Projects.
 
-## Review and cutover boundary
+## Review and cutover closure
 
-The review gate includes unit, integration, frontend, E2E, build, migration
-checksum/backup/integrity, indexed query plans, secret scan, production image
-build, and three-boot MinIO/Litestream recovery. Production remains on schema
-v3 until a separate audited cutover explicitly authorizes migration v4.
+The review and production gates passed unit, integration, frontend, build,
+migration checksum/backup/integrity, indexed query-plan, secret-scan, and
+restart durability checks. Production now runs schema v4. Phase 3D remains a
+separate implementation and cutover boundary.

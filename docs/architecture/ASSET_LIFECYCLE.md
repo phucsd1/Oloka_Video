@@ -1,5 +1,7 @@
 # Asset Lifecycle
 
+Status: Slice 3D implementation in review; production cutover pending.
+
 ## Independent state axes
 
 Asset ingestion records the result of receiving and inspecting media:
