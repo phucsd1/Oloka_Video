@@ -162,6 +162,10 @@ export class SqliteSystemDatabase implements SystemDatabase {
       }
       if (currentVersion === 2) {
         this.applyIdentityAndApprovalMigration(migrations[2]);
+        currentVersion = 3;
+      }
+      if (currentVersion === 3) {
+        this.applyCanonicalProjectMigration(migrations[3]);
       }
       this.verifyAppliedMigrations(migrations);
       this.migrationFailure = undefined;
@@ -280,7 +284,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
       this.assertExactFoundationColumns();
       return;
     }
-    if (version === 2 || version === 3) {
+    if (version === 2 || version === 3 || version === 4) {
       const expectedTables =
         version === 2
           ? [
@@ -291,18 +295,32 @@ export class SqliteSystemDatabase implements SystemDatabase {
               "system_metadata",
               "users",
             ]
-          : [
-              "audit_events",
-              "idempotency_records",
-              "oauth_identities",
-              "oauth_transactions",
-              "outbox_events",
-              "provider_credential_references",
-              "schema_migrations",
-              "sessions",
-              "system_metadata",
-              "users",
-            ];
+          : version === 3
+            ? [
+                "audit_events",
+                "idempotency_records",
+                "oauth_identities",
+                "oauth_transactions",
+                "outbox_events",
+                "provider_credential_references",
+                "schema_migrations",
+                "sessions",
+                "system_metadata",
+                "users",
+              ]
+            : [
+                "audit_events",
+                "idempotency_records",
+                "oauth_identities",
+                "oauth_transactions",
+                "outbox_events",
+                "projects",
+                "provider_credential_references",
+                "schema_migrations",
+                "sessions",
+                "system_metadata",
+                "users",
+              ];
       const applicationTables = tables.filter(
         (table) => !table.startsWith("_litestream_"),
       );
@@ -456,6 +474,31 @@ export class SqliteSystemDatabase implements SystemDatabase {
     });
   }
 
+  private applyCanonicalProjectMigration(
+    migration: MigrationAsset | undefined,
+  ): void {
+    if (migration?.version !== 4)
+      throw new Error("Canonical Project migration is missing");
+    const startedAt = this.clock.now();
+    this.transactions.run("immediate", ({ database }) => {
+      database.exec(migration.sql);
+      database
+        .prepare(
+          `INSERT INTO schema_migrations
+            (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          migration.version,
+          migration.name,
+          migration.checksum,
+          this.clock.now(),
+          Math.max(0, this.clock.now() - startedAt),
+          this.appBuildSha,
+        );
+    });
+  }
+
   private verifyAppliedMigrations(migrations: MigrationAsset[]): void {
     const rows = this.database
       .prepare(
@@ -501,6 +544,7 @@ async function loadMigrationAssets(): Promise<MigrationAsset[]> {
     [1, "foundation_system_tables", "0001-foundation-system-tables.sql"],
     [2, "persistence-kernel", "0002-persistence-kernel.sql"],
     [3, "identity-and-approval", "0003-identity-and-approval.sql"],
+    [4, "canonical-project", "0004-canonical-project.sql"],
   ] as const;
   return Promise.all(
     definitions.map(async ([version, name, filename]) => {

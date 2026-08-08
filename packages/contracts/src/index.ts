@@ -82,6 +82,80 @@ export const opaqueCursorSchema = z
   .max(2048)
   .regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
 
+export const projectStatusSchema = z.enum([
+  "active",
+  "soft_deleted",
+  "purge_scheduled",
+  "purging",
+  "purged",
+]);
+
+const projectNameSchema = z.string().trim().min(1).max(200);
+const projectDescriptionSchema = z.string().trim().max(2000).nullable();
+const utcTimestampSchema = z.iso.datetime({ offset: true });
+
+export const projectSchema = z
+  .object({
+    id: z.uuid(),
+    name: projectNameSchema,
+    description: projectDescriptionSchema,
+    favorite: z.boolean(),
+    status: projectStatusSchema,
+    createdAt: utcTimestampSchema,
+    updatedAt: utcTimestampSchema,
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+export const projectSummarySchema = projectSchema;
+
+export const createProjectRequestSchema = z
+  .object({
+    name: projectNameSchema,
+    description: z.string().trim().max(2000).optional(),
+  })
+  .strict();
+
+export const updateProjectRequestSchema = z
+  .object({
+    name: projectNameSchema.optional(),
+    description: z.string().trim().max(2000).nullable().optional(),
+    favorite: z.boolean().optional(),
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.name !== undefined ||
+      value.description !== undefined ||
+      value.favorite !== undefined,
+    { message: "At least one presentation field is required" },
+  );
+
+export const projectMutationRequestSchema = z
+  .object({ expectedVersion: z.number().int().positive() })
+  .strict();
+
+export const projectListQuerySchema = z
+  .object({
+    cursor: opaqueCursorSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(25),
+    favorite: z
+      .enum(["true", "false"])
+      .transform((value) => value === "true")
+      .optional(),
+  })
+  .strict();
+
+export const projectListResponseSchema = z
+  .object({
+    projects: z.array(projectSummarySchema).max(100),
+    nextCursor: opaqueCursorSchema.nullable(),
+  })
+  .strict();
+
+export const trashProjectListResponseSchema = projectListResponseSchema;
+
 export const adminUsersQuerySchema = z
   .object({
     status: userStatusSchema.optional(),
@@ -174,6 +248,14 @@ export type VersionResponse = z.infer<typeof versionResponseSchema>;
 export type IdentityUser = z.infer<typeof identityUserSchema>;
 export type AuthSessionResponse = z.infer<typeof authSessionResponseSchema>;
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;
+export type Project = z.infer<typeof projectSchema>;
+export type ProjectSummary = z.infer<typeof projectSummarySchema>;
+export type CreateProjectRequest = z.infer<typeof createProjectRequestSchema>;
+export type UpdateProjectRequest = z.infer<typeof updateProjectRequestSchema>;
+export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
+export type TrashProjectListResponse = z.infer<
+  typeof trashProjectListResponseSchema
+>;
 export type PublicErrorCode = z.infer<typeof publicErrorCodeSchema>;
 export type AdminUserTransitionRequest = z.infer<
   typeof adminUserTransitionRequestSchema
