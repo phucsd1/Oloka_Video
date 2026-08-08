@@ -15,6 +15,7 @@ import { ProjectService } from "../project/project-service.js";
 import { FilesystemObjectStorage } from "../storage/filesystem-object-storage.js";
 import { registerAssetRoutes } from "./asset-routes.js";
 import { AssetService } from "./asset-service.js";
+import { BaselineQuotaPolicyResolver } from "../quota/quota-policy.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -27,6 +28,54 @@ afterEach(async () => {
 });
 
 describe("Asset HTTP routes", () => {
+  it("does not expose a public Asset restore route", async () => {
+    const fixture = await createFixture();
+    try {
+      expect(
+        fixture.app.hasRoute({
+          method: "POST",
+          url: "/api/v1/assets/:assetId/restore",
+        }),
+      ).toBe(false);
+    } finally {
+      await fixture.app.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("requires idempotency and expectedVersion for retry-ingestion", async () => {
+    const fixture = await createFixture();
+    try {
+      const headers = {
+        cookie: "__Host-oloka_session=test",
+        origin: "https://oloka.example.test",
+        "x-oloka-csrf": "csrf-test-token",
+        "content-type": "application/json",
+      };
+      const assetId = "00000000-0000-4000-8000-000000000099";
+      const missingKey = await fixture.app.inject({
+        method: "POST",
+        url: `/api/v1/assets/${assetId}/retry-ingestion`,
+        headers,
+        payload: { expectedVersion: 1 },
+      });
+      expect(missingKey.statusCode).toBe(400);
+      expect(missingKey.json().error.code).toBe("VALIDATION_ERROR");
+
+      const missingVersion = await fixture.app.inject({
+        method: "POST",
+        url: `/api/v1/assets/${assetId}/retry-ingestion`,
+        headers: { ...headers, "idempotency-key": "retry-route-key" },
+        payload: {},
+      });
+      expect(missingVersion.statusCode).toBe(400);
+      expect(missingVersion.json().error.code).toBe("VALIDATION_ERROR");
+    } finally {
+      await fixture.app.close();
+      await fixture.database.close();
+    }
+  });
+
   it("uploads and privately serves single byte ranges", async () => {
     const fixture = await createFixture();
     try {
@@ -94,6 +143,30 @@ describe("Asset HTTP routes", () => {
         id: assetId,
         ingestionStatus: "ready",
       });
+
+      const capabilityResponse = await fixture.app.inject({
+        method: "POST",
+        url: `/api/v1/assets/${assetId}/delivery-capabilities`,
+        headers: {
+          ...common,
+          "content-type": "application/json",
+          "idempotency-key": "route-stream-capability",
+        },
+        payload: { operation: "stream" },
+      });
+      expect(capabilityResponse.statusCode, capabilityResponse.body).toBe(200);
+      const capability = capabilityResponse.json().capability as string;
+      const scopedStream = await fixture.app.inject({
+        method: "GET",
+        url: `/api/v1/assets/${assetId}/content?capability=${encodeURIComponent(capability)}&operation=stream`,
+      });
+      expect(scopedStream.statusCode, scopedStream.body).toBe(200);
+      expect(scopedStream.headers["content-disposition"]).toMatch(/^inline;/);
+      const wrongOperation = await fixture.app.inject({
+        method: "GET",
+        url: `/api/v1/assets/${assetId}/content?capability=${encodeURIComponent(capability)}&operation=download`,
+      });
+      expect(wrongOperation.statusCode).toBe(404);
 
       const head = await fixture.app.inject({
         method: "HEAD",
@@ -186,6 +259,7 @@ async function createFixture() {
     applicationKey: Buffer.alloc(32, 7),
     clock,
     idGenerator,
+    quotaPolicyResolver: new BaselineQuotaPolicyResolver(),
   });
   const identityService = {
     getSession: () => actor,

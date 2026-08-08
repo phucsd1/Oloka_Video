@@ -17,11 +17,12 @@ export interface ObjectStorage {
   statStaging(stagingKey: string): Promise<StoredObjectStat>;
   truncateStaging(stagingKey: string, size: number): Promise<void>;
   finalize(stagingKey: string, storageKey: string): Promise<void>;
+  rollbackFinalize(stagingKey: string, storageKey: string): Promise<void>;
   openRange(
     storageKey: string,
     start: number,
     end: number,
-  ): NodeJS.ReadableStream;
+  ): Promise<NodeJS.ReadableStream>;
   head(storageKey: string): Promise<StoredObjectStat>;
   delete(kind: "staging" | "durable", key: string): Promise<void>;
   listForReconciliation(): Promise<{ staging: string[]; durable: string[] }>;

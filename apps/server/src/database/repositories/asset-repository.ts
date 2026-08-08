@@ -147,6 +147,17 @@ export class AssetRepository {
     );
   }
 
+  getUploadByAsset(
+    context: TransactionContext,
+    assetId: string,
+  ): UploadSessionRow | null {
+    return (
+      (context.database
+        .prepare("SELECT * FROM upload_sessions WHERE asset_id = ?")
+        .get(assetId) as UploadSessionRow | undefined) ?? null
+    );
+  }
+
   getAsset(context: TransactionContext, id: string): AssetRow | null {
     return (
       (context.database.prepare("SELECT * FROM assets WHERE id = ?").get(id) as
@@ -228,6 +239,22 @@ export class AssetRepository {
             "UPDATE upload_sessions SET status = 'verifying', updated_at = ?, version = version + 1 WHERE id = ? AND status = 'open' AND version = ?",
           )
           .run(now, id, expectedVersion).changes,
+      ) === 1
+    );
+  }
+
+  reopenVerifying(
+    context: TransactionContext,
+    id: string,
+    now: number,
+  ): boolean {
+    return (
+      Number(
+        context.database
+          .prepare(
+            "UPDATE upload_sessions SET status = 'open', updated_at = ?, version = version + 1 WHERE id = ? AND status = 'verifying'",
+          )
+          .run(now, id).changes,
       ) === 1
     );
   }
@@ -350,6 +377,58 @@ export class AssetRepository {
           .run(now, id, ownerUserId, expectedVersion).changes,
       ) === 1
     );
+  }
+
+  retryUpload(
+    context: TransactionContext,
+    input: {
+      assetId: string;
+      ownerUserId: string;
+      expectedAssetVersion: number;
+      uploadId: string;
+      stagingKey: string;
+      storageKey: string;
+      expiresAt: number;
+      now: number;
+    },
+  ): boolean {
+    const upload = context.database
+      .prepare(
+        `UPDATE upload_sessions
+         SET id = ?, staging_key = ?, received_size = 0,
+             last_chunk_offset = NULL, last_chunk_size = NULL,
+             last_chunk_checksum_sha256 = NULL, status = 'open',
+             expires_at = ?, updated_at = ?, version = version + 1
+         WHERE asset_id = ? AND owner_user_id = ?
+           AND status IN ('completed', 'aborted', 'expired', 'rejected')`,
+      )
+      .run(
+        input.uploadId,
+        input.stagingKey,
+        input.expiresAt,
+        input.now,
+        input.assetId,
+        input.ownerUserId,
+      );
+    if (Number(upload.changes) !== 1) return false;
+    const asset = context.database
+      .prepare(
+        `UPDATE assets
+         SET storage_key = ?, verified_mime = NULL,
+             byte_checksum_sha256 = NULL, metadata_json = NULL,
+             ingestion_status = 'upload_pending', failure_code = NULL,
+             updated_at = ?, version = version + 1
+         WHERE id = ? AND owner_user_id = ? AND version = ?
+           AND ingestion_status = 'failed' AND lifecycle_status = 'active'`,
+      )
+      .run(
+        input.storageKey,
+        input.now,
+        input.assetId,
+        input.ownerUserId,
+        input.expectedAssetVersion,
+      );
+    return Number(asset.changes) === 1;
   }
 
   listOwned(

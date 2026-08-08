@@ -27,6 +27,7 @@ import { registerProjectRoutes } from "./project/project-routes.js";
 import { AssetService } from "./asset/asset-service.js";
 import { registerAssetRoutes } from "./asset/asset-routes.js";
 import { AssetMaintenanceService } from "./asset/asset-maintenance-service.js";
+import { BaselineQuotaPolicyResolver } from "./quota/quota-policy.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -125,6 +126,7 @@ export async function buildApplication(
           applicationKey: environment.appKey,
           clock: new SystemClock(),
           idGenerator: new UuidIdGenerator(),
+          quotaPolicyResolver: new BaselineQuotaPolicyResolver(),
         });
   registerAssetRoutes({
     app,

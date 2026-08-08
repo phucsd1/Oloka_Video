@@ -1,19 +1,11 @@
-import { createReadStream } from "node:fs";
-import {
-  mkdir,
-  open,
-  unlink,
-  stat,
-  lstat,
-  realpath,
-  rename,
-  readdir,
-  rm,
-} from "node:fs/promises";
+import { constants } from "node:fs";
+import { link, mkdir, open, unlink, lstat, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ObjectStorage, ReadinessResult } from "./object-storage.js";
 import type { StoredObjectStat } from "./object-storage.js";
+
+const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
 export class FilesystemObjectStorage implements ObjectStorage {
   readonly #probePath: string;
@@ -44,10 +36,10 @@ export class FilesystemObjectStorage implements ObjectStorage {
     if (!Number.isSafeInteger(offset) || offset < 0)
       throw new Error("Invalid append offset");
     const target = await this.resolveContained("staging", stagingKey);
-    const current = await stat(target);
-    if (current.size !== offset) throw new Error("Staging offset conflict");
-    const handle = await open(target, "r+");
+    const handle = await this.openRegularFile(target, constants.O_RDWR);
     try {
+      const current = await handle.stat();
+      if (current.size !== offset) throw new Error("Staging offset conflict");
       let written = 0;
       while (written < bytes.byteLength) {
         const result = await handle.write(
@@ -72,7 +64,7 @@ export class FilesystemObjectStorage implements ObjectStorage {
     if (!Number.isSafeInteger(size) || size < 0)
       throw new Error("Invalid truncate size");
     const target = await this.resolveContained("staging", stagingKey);
-    const handle = await open(target, "r+");
+    const handle = await this.openRegularFile(target, constants.O_RDWR);
     try {
       await handle.truncate(size);
       await handle.sync();
@@ -85,22 +77,55 @@ export class FilesystemObjectStorage implements ObjectStorage {
     const source = await this.resolveContained("staging", stagingKey);
     const destination = await this.resolveContained("durable", storageKey);
     await mkdir(dirname(destination), { recursive: true });
+    const sourceHandle = await this.openRegularFile(source, constants.O_RDONLY);
+    await sourceHandle.close();
+    await link(source, destination);
+    const destinationHandle = await this.openRegularFile(
+      destination,
+      constants.O_RDWR,
+    );
     try {
-      await lstat(destination);
-      throw new Error("Durable object already exists");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await destinationHandle.sync();
+    } finally {
+      await destinationHandle.close();
     }
-    await rename(source, destination);
+    await unlink(source);
   }
 
-  openRange(
+  async rollbackFinalize(
+    stagingKey: string,
+    storageKey: string,
+  ): Promise<void> {
+    const staging = await this.resolveContained("staging", stagingKey);
+    const durable = await this.resolveContained("durable", storageKey);
+    const stagingEntry = await lstat(staging).catch(() => undefined);
+    const durableEntry = await lstat(durable).catch(() => undefined);
+    if (stagingEntry !== undefined && durableEntry === undefined) {
+      await this.openRegularFile(staging, constants.O_RDONLY).then((handle) =>
+        handle.close(),
+      );
+      return;
+    }
+    if (stagingEntry !== undefined && durableEntry !== undefined)
+      throw new Error("Finalize rollback collision");
+    if (stagingEntry === undefined && durableEntry === undefined)
+      throw new Error("Finalized object missing");
+    await this.openRegularFile(durable, constants.O_RDONLY).then((handle) =>
+      handle.close(),
+    );
+    await mkdir(dirname(staging), { recursive: true });
+    await link(durable, staging);
+    await unlink(durable);
+  }
+
+  async openRange(
     storageKey: string,
     start: number,
     end: number,
-  ): NodeJS.ReadableStream {
-    const target = this.resolveContainedSync("durable", storageKey);
-    return createReadStream(target, { start, end });
+  ): Promise<NodeJS.ReadableStream> {
+    const target = await this.resolveContained("durable", storageKey);
+    const handle = await this.openRegularFile(target, constants.O_RDONLY);
+    return handle.createReadStream({ start, end, autoClose: true });
   }
 
   async head(storageKey: string): Promise<StoredObjectStat> {
@@ -109,7 +134,11 @@ export class FilesystemObjectStorage implements ObjectStorage {
 
   async delete(kind: "staging" | "durable", key: string): Promise<void> {
     const target = await this.resolveContained(kind, key);
-    await rm(target, { force: true });
+    const entry = await lstat(target).catch(() => undefined);
+    if (entry === undefined) return;
+    if (!entry.isFile() || entry.isSymbolicLink())
+      throw new Error("Storage symlink rejected");
+    await unlink(target);
   }
 
   async listForReconciliation(): Promise<{
@@ -138,7 +167,7 @@ export class FilesystemObjectStorage implements ObjectStorage {
     length: number,
   ): Promise<Buffer> {
     const target = await this.resolveContained(kind, key);
-    const handle = await open(target, "r");
+    const handle = await this.openRegularFile(target, constants.O_RDONLY);
     try {
       const buffer = Buffer.alloc(length);
       const result = await handle.read(buffer, 0, length, 0);
@@ -161,10 +190,15 @@ export class FilesystemObjectStorage implements ObjectStorage {
     key: string,
   ): Promise<string> {
     const target = await this.resolveContained(kind, key);
+    const handle = await this.openRegularFile(target, constants.O_RDONLY);
     const digest = createHash("sha256");
-    const stream = createReadStream(target);
-    for await (const chunk of stream) digest.update(chunk as Buffer);
-    return digest.digest("hex");
+    try {
+      const stream = handle.createReadStream({ autoClose: false });
+      for await (const chunk of stream) digest.update(chunk as Buffer);
+      return digest.digest("hex");
+    } finally {
+      await handle.close();
+    }
   }
 
   checkReadiness(): Promise<ReadinessResult> {
@@ -213,8 +247,13 @@ export class FilesystemObjectStorage implements ObjectStorage {
     key: string,
   ): Promise<StoredObjectStat> {
     const target = await this.resolveContained(kind, key);
-    const result = await stat(target);
-    return { size: result.size, modifiedAt: result.mtime };
+    const handle = await this.openRegularFile(target, constants.O_RDONLY);
+    try {
+      const result = await handle.stat();
+      return { size: result.size, modifiedAt: result.mtime };
+    } finally {
+      await handle.close();
+    }
   }
 
   private async resolveContained(
@@ -222,10 +261,7 @@ export class FilesystemObjectStorage implements ObjectStorage {
     key: string,
   ): Promise<string> {
     const target = this.resolveContainedSync(kind, key);
-    await this.assertNoSymlinkParents(
-      target,
-      kind === "staging" ? this.#tmpRoot : this.#objectsRoot,
-    );
+    await this.assertNoSymlinkParents(target, this.rootPath);
     return target;
   }
 
@@ -264,16 +300,36 @@ export class FilesystemObjectStorage implements ObjectStorage {
     target: string,
     base: string,
   ): Promise<void> {
-    const realBase = await realpath(base).catch(() => resolve(base));
-    let current = resolve(target);
+    const resolvedBase = resolve(base);
+    const resolvedTarget = resolve(target);
+    if (
+      resolvedTarget !== resolvedBase &&
+      !resolvedTarget.startsWith(resolvedBase + sep)
+    )
+      throw new Error("Storage key containment violation");
+    let current = resolvedTarget;
     const parents: string[] = [];
-    while (current !== realBase && current.startsWith(realBase + sep)) {
+    while (current !== resolvedBase) {
       parents.push(current);
       current = dirname(current);
     }
+    parents.push(resolvedBase);
     for (const path of parents.reverse()) {
       const entry = await lstat(path).catch(() => undefined);
       if (entry?.isSymbolicLink()) throw new Error("Storage symlink rejected");
+    }
+  }
+
+  private async openRegularFile(target: string, flags: number) {
+    const handle = await open(target, flags | NO_FOLLOW);
+    try {
+      const entry = await handle.stat();
+      if (!entry.isFile())
+        throw new Error("Storage target is not a regular file");
+      return handle;
+    } catch (error) {
+      await handle.close();
+      throw error;
     }
   }
 

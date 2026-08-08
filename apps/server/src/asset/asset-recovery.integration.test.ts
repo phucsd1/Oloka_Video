@@ -9,6 +9,7 @@ import type { AuthenticatedSession } from "../identity/identity-service.js";
 import { ProjectService } from "../project/project-service.js";
 import { FilesystemObjectStorage } from "../storage/filesystem-object-storage.js";
 import { AssetService } from "./asset-service.js";
+import { BaselineQuotaPolicyResolver } from "../quota/quota-policy.js";
 
 const temporaryDirectories: string[] = [];
 const PNG = Buffer.from(
@@ -63,6 +64,7 @@ describe("Asset three-boot recovery", () => {
       applicationKey: key,
       clock,
       idGenerator,
+      quotaPolicyResolver: new BaselineQuotaPolicyResolver(),
     });
     const initialized = await service.initializeUpload(
       actor,
@@ -112,6 +114,7 @@ describe("Asset three-boot recovery", () => {
         applicationKey: key,
         clock,
         idGenerator,
+        quotaPolicyResolver: new BaselineQuotaPolicyResolver(),
       });
       const asset = recovered.getAsset(actor, completed.asset.id);
       expect(asset).toMatchObject({

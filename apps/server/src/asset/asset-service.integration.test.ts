@@ -5,11 +5,17 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteSystemDatabase } from "../database/sqlite-system-database.js";
+import type {
+  TransactionContext,
+  TransactionMode,
+  TransactionRunner,
+} from "../database/database.js";
 import type { AuthenticatedSession } from "../identity/identity-service.js";
 import { ProjectService } from "../project/project-service.js";
 import { FilesystemObjectStorage } from "../storage/filesystem-object-storage.js";
 import { AssetService } from "./asset-service.js";
 import { AssetMaintenanceService } from "./asset-maintenance-service.js";
+import { BaselineQuotaPolicyResolver } from "../quota/quota-policy.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -22,6 +28,219 @@ afterEach(async () => {
 });
 
 describe("Asset service", () => {
+  it("uses the injected quota policy for Asset admission", async () => {
+    const fixture = await createFixture({
+      maxAssetSizeBytes: 8,
+      maxProjectStorageBytes: 16,
+    });
+    try {
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          { originalFilename: "too-large.png", kind: "image", declaredSize: 9 },
+          "quota-asset-limit",
+        ),
+      ).rejects.toMatchObject({ code: "PAYLOAD_TOO_LARGE" });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("enforces project storage policy and does not double-reserve an idempotent replay", async () => {
+    const fixture = await createFixture({
+      maxAssetSizeBytes: 16,
+      maxProjectStorageBytes: 16,
+    });
+    try {
+      const first = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "quota-project.png",
+          kind: "image",
+          declaredSize: 12,
+        },
+        "quota-project-key",
+      );
+      const replay = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "quota-project.png",
+          kind: "image",
+          declaredSize: 12,
+        },
+        "quota-project-key",
+      );
+      expect(replay.replayed).toBe(true);
+      expect(replay.upload.uploadId).toBe(first.upload.uploadId);
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          {
+            originalFilename: "quota-project-2.png",
+            kind: "image",
+            declaredSize: 5,
+          },
+          "quota-project-key-2",
+        ),
+      ).rejects.toMatchObject({ code: "QUOTA_EXCEEDED" });
+      fixture.service.abortUpload(fixture.actor, first.upload.uploadId);
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          {
+            originalFilename: "quota-project-3.png",
+            kind: "image",
+            declaredSize: 12,
+          },
+          "quota-project-key-3",
+        ),
+      ).resolves.toMatchObject({ upload: { status: "open" } });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("does not persist a successful initialization replay when staging fails", async () => {
+    const fixture = await createFixture(undefined, true);
+    try {
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          {
+            originalFilename: "stage-failure.png",
+            kind: "image",
+            declaredSize: 8,
+          },
+          "stage-failure",
+        ),
+      ).rejects.toMatchObject({ code: "STORAGE_UNAVAILABLE" });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database.prepare("SELECT COUNT(*) AS count FROM assets").get(),
+        ),
+      ).toEqual({ count: 0 });
+
+      fixture.setStageFailure(false);
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          {
+            originalFilename: "stage-failure.png",
+            kind: "image",
+            declaredSize: 8,
+          },
+          "stage-failure",
+        ),
+      ).resolves.toMatchObject({ replayed: false, upload: { status: "open" } });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("cleans staging after admission DB failure and allows a fresh retry", async () => {
+    const fixture = await createFixture();
+    try {
+      fixture.setNextImmediateFailure(true);
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          {
+            originalFilename: "db-admission-failure.png",
+            kind: "image",
+            declaredSize: 8,
+          },
+          "db-admission-failure",
+        ),
+      ).rejects.toThrow("injected finalize DB failure");
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database.prepare("SELECT COUNT(*) AS count FROM assets").get(),
+        ),
+      ).toEqual({ count: 0 });
+      fixture.setNextImmediateFailure(false);
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          {
+            originalFilename: "db-admission-failure.png",
+            kind: "image",
+            declaredSize: 8,
+          },
+          "db-admission-failure",
+        ),
+      ).resolves.toMatchObject({ replayed: false, upload: { status: "open" } });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("reopens a verifying upload when staging verification infrastructure fails", async () => {
+    const fixture = await createFixture();
+    try {
+      const initialized = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "verify-retry.png",
+          kind: "image",
+          declaredSize: PNG.length,
+        },
+        "verify-retry-upload",
+      );
+      await fixture.service.appendChunk(
+        fixture.actor,
+        initialized.upload.uploadId,
+        0,
+        PNG,
+        checksum(PNG),
+      );
+      fixture.setCreateStagingHashFailure(true);
+      await expect(
+        fixture.service.completeUpload(
+          fixture.actor,
+          initialized.upload.uploadId,
+          {},
+          "verify-retry-complete",
+        ),
+      ).rejects.toMatchObject({ code: "STORAGE_UNAVAILABLE" });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT status FROM upload_sessions WHERE id = ?")
+            .get(initialized.upload.uploadId),
+        ),
+      ).toEqual({ status: "open" });
+      fixture.setCreateStagingHashFailure(false);
+      await expect(
+        fixture.service.completeUpload(
+          fixture.actor,
+          initialized.upload.uploadId,
+          {},
+          "verify-retry-complete",
+        ),
+      ).resolves.toMatchObject({
+        replayed: false,
+        asset: { ingestionStatus: "ready" },
+      });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
   it("creates one Asset identity, accepts a checked chunk, and finalizes it ready", async () => {
     const fixture = await createFixture();
     try {
@@ -219,6 +438,7 @@ describe("Asset service", () => {
         fixture.actor,
         ready.id,
         "stream",
+        "capability-stream",
       );
       const stored = fixture.database.transactions.run(
         "read",
@@ -279,6 +499,140 @@ describe("Asset service", () => {
     }
   });
 
+  it("replays capability issuance without creating another capability", async () => {
+    const fixture = await createFixture();
+    try {
+      const ready = await createReadyAsset(fixture, "capability-idempotency");
+      const first = fixture.service.issueCapability(
+        fixture.actor,
+        ready.id,
+        "preview",
+        "capability-idempotency-key",
+      );
+      const replay = fixture.service.issueCapability(
+        fixture.actor,
+        ready.id,
+        "preview",
+        "capability-idempotency-key",
+      );
+      expect(replay).toEqual(first);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT COUNT(*) AS count FROM delivery_capabilities")
+            .get(),
+        ),
+      ).toEqual({ count: 1 });
+      expect(() =>
+        fixture.service.issueCapability(
+          fixture.actor,
+          ready.id,
+          "download",
+          "capability-idempotency-key",
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "IDEMPOTENCY_CONFLICT",
+        }) as unknown as Error,
+      );
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("isolates stream, preview, and download capability operations", async () => {
+    const fixture = await createFixture();
+    try {
+      const ready = await createReadyAsset(fixture, "capability-scope");
+      const operations = ["stream", "preview", "download"] as const;
+      const capabilities = new Map(
+        operations.map((operation) => [
+          operation,
+          fixture.service.issueCapability(
+            fixture.actor,
+            ready.id,
+            operation,
+            `capability-scope-${operation}`,
+          ).capability,
+        ]),
+      );
+      for (const issuedOperation of operations) {
+        for (const requestedOperation of operations) {
+          const descriptor = fixture.service.authorizeCapabilityDelivery(
+            ready.id,
+            capabilities.get(issuedOperation)!,
+            requestedOperation,
+          );
+          if (issuedOperation === requestedOperation) {
+            expect(descriptor?.capabilityOperation).toBe(issuedOperation);
+          } else {
+            expect(descriptor).toBeNull();
+          }
+        }
+      }
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("retries failed ingestion idempotently with a new attempt for the same Asset", async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = await createFailedAsset(fixture, "retry-ingestion");
+      const first = await fixture.service.retryIngestion(
+        fixture.actor,
+        failed.asset.id,
+        failed.asset.version,
+        "retry-ingestion-key",
+      );
+      const replay = await fixture.service.retryIngestion(
+        fixture.actor,
+        failed.asset.id,
+        failed.asset.version,
+        "retry-ingestion-key",
+      );
+      expect(first).toMatchObject({
+        replayed: false,
+        asset: {
+          id: failed.asset.id,
+          ingestionStatus: "upload_pending",
+          lifecycleStatus: "active",
+        },
+        upload: { status: "open", receivedSize: 0 },
+      });
+      expect(first.upload.uploadId).not.toBe(failed.uploadId);
+      await expect(
+        fixture.storage.statStaging(failed.uploadId),
+      ).rejects.toThrow();
+      expect(replay).toMatchObject({
+        replayed: true,
+        upload: { uploadId: first.upload.uploadId },
+      });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'asset.ingestion_retry'",
+            )
+            .get(),
+        ),
+      ).toEqual({ count: 1 });
+      await expect(
+        fixture.service.retryIngestion(
+          fixture.actor,
+          failed.asset.id,
+          first.asset.version,
+          "retry-ingestion-key",
+        ),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
   it("aborts and expires uploads without deleting completed durable bytes", async () => {
     const fixture = await createFixture();
     try {
@@ -318,6 +672,109 @@ describe("Asset service", () => {
             .get(expired.upload.uploadId),
         ),
       ).toEqual({ status: "expired" });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("reconciles a stranded verifying upload back to open when staging remains", async () => {
+    const fixture = await createFixture();
+    try {
+      const initialized = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "maintenance-verifying.png",
+          kind: "image",
+          declaredSize: PNG.length,
+        },
+        "maintenance-verifying-upload",
+      );
+      await fixture.service.appendChunk(
+        fixture.actor,
+        initialized.upload.uploadId,
+        0,
+        PNG,
+        checksum(PNG),
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE upload_sessions SET status = 'verifying' WHERE id = ?",
+          )
+          .run(initialized.upload.uploadId);
+      });
+      const maintenance = new AssetMaintenanceService(
+        fixture.database.transactions,
+        fixture.storage,
+      );
+      await maintenance.run(1_700_000_000_100);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT status FROM upload_sessions WHERE id = ?")
+            .get(initialized.upload.uploadId),
+        ),
+      ).toEqual({ status: "open" });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("rolls a finalized object back to staging when the finalize DB commit fails", async () => {
+    const fixture = await createFixture();
+    try {
+      const initialized = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "db-failure.png",
+          kind: "image",
+          declaredSize: PNG.length,
+        },
+        "db-failure-upload",
+      );
+      await fixture.service.appendChunk(
+        fixture.actor,
+        initialized.upload.uploadId,
+        0,
+        PNG,
+        checksum(PNG),
+      );
+      fixture.setFinalizeCommitFailure(true);
+      await expect(
+        fixture.service.completeUpload(
+          fixture.actor,
+          initialized.upload.uploadId,
+          {},
+          "db-failure-complete",
+        ),
+      ).rejects.toThrow();
+      await expect(
+        fixture.storage.statStaging(initialized.upload.uploadId),
+      ).resolves.toMatchObject({ size: PNG.length });
+      await expect(
+        fixture.storage.head(
+          fixture.database.transactions.run(
+            "read",
+            ({ database }) =>
+              (
+                database
+                  .prepare("SELECT storage_key FROM assets WHERE id = ?")
+                  .get(initialized.asset.id) as { storage_key: string }
+              ).storage_key,
+          ),
+        ),
+      ).rejects.toThrow();
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT status FROM upload_sessions WHERE id = ?")
+            .get(initialized.upload.uploadId),
+        ),
+      ).toEqual({ status: "open" });
     } finally {
       await fixture.database.close();
       await fixture.storage.close();
@@ -439,7 +896,83 @@ function checksum(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function createFixture() {
+async function createReadyAsset(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  key: string,
+) {
+  const initialized = await fixture.service.initializeUpload(
+    fixture.actor,
+    fixture.projectId,
+    {
+      originalFilename: `${key}.png`,
+      kind: "image",
+      declaredMime: "image/png",
+      declaredSize: PNG.length,
+    },
+    `${key}-upload`,
+  );
+  await fixture.service.appendChunk(
+    fixture.actor,
+    initialized.upload.uploadId,
+    0,
+    PNG,
+    checksum(PNG),
+  );
+  return (
+    await fixture.service.completeUpload(
+      fixture.actor,
+      initialized.upload.uploadId,
+      {},
+      `${key}-complete`,
+    )
+  ).asset;
+}
+
+async function createFailedAsset(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  key: string,
+) {
+  const initialized = await fixture.service.initializeUpload(
+    fixture.actor,
+    fixture.projectId,
+    {
+      originalFilename: `${key}.jpg`,
+      kind: "image",
+      declaredMime: "image/jpeg",
+      declaredSize: PNG.length,
+    },
+    `${key}-upload`,
+  );
+  await fixture.service.appendChunk(
+    fixture.actor,
+    initialized.upload.uploadId,
+    0,
+    PNG,
+    checksum(PNG),
+  );
+  await expect(
+    fixture.service.completeUpload(
+      fixture.actor,
+      initialized.upload.uploadId,
+      {},
+      `${key}-complete`,
+    ),
+  ).rejects.toMatchObject({ code: "UNSUPPORTED_MEDIA_TYPE" });
+  return {
+    asset: fixture.service.getAsset(fixture.actor, initialized.asset.id),
+    uploadId: initialized.upload.uploadId,
+  };
+}
+
+async function createFixture(
+  quota:
+    | {
+        maxAssetSizeBytes: number;
+        maxProjectStorageBytes: number;
+      }
+    | undefined = undefined,
+  stageFailure = false,
+) {
   const directory = await mkdtemp(join(tmpdir(), "oloka-asset-service-"));
   temporaryDirectories.push(directory);
   const database = await SqliteSystemDatabase.connect(
@@ -489,12 +1022,52 @@ async function createFixture() {
     "asset-project",
   ).project.id;
   const storage = new FilesystemObjectStorage(join(directory, "objects-root"));
+  let shouldFailStage = stageFailure;
+  let shouldFailCreateStagingHash = false;
+  let shouldFailFinalizeCommit = false;
+  let failNextImmediate = false;
+  const serviceTransactions: TransactionRunner = {
+    run<T>(
+      mode: TransactionMode,
+      operation: (context: TransactionContext) => T,
+    ): T {
+      if (mode === "immediate" && failNextImmediate) {
+        failNextImmediate = false;
+        throw new Error("injected finalize DB failure");
+      }
+      return database.transactions.run(mode, operation);
+    },
+  };
+  const serviceStorage = new Proxy(storage, {
+    get(target, property, receiver) {
+      if (property === "stage" && shouldFailStage)
+        return () => Promise.reject(new Error("injected stage failure"));
+      if (property === "createStagingHash" && shouldFailCreateStagingHash)
+        return () => Promise.reject(new Error("injected staging hash failure"));
+      if (property === "finalize" && shouldFailFinalizeCommit)
+        return async (stagingKey: string, storageKey: string) => {
+          await target.finalize(stagingKey, storageKey);
+          failNextImmediate = true;
+        };
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return (
+        typeof value === "function" ? value.bind(target) : value
+      ) as never;
+    },
+  });
   const service = new AssetService({
-    transactions: database.transactions,
-    storage,
+    transactions: serviceTransactions,
+    storage: serviceStorage,
     applicationKey: Buffer.alloc(32, 8),
     clock,
     idGenerator,
+    quotaPolicyResolver: new BaselineQuotaPolicyResolver({
+      version: "asset-service-test",
+      ...(quota ?? {
+        maxAssetSizeBytes: 500 * 1024 * 1024,
+        maxProjectStorageBytes: 5 * 1024 * 1024 * 1024,
+      }),
+    }),
   });
   return {
     database,
@@ -506,6 +1079,18 @@ async function createFixture() {
     projectId,
     setNow: (value: number) => {
       now = value;
+    },
+    setStageFailure: (value: boolean) => {
+      shouldFailStage = value;
+    },
+    setCreateStagingHashFailure: (value: boolean) => {
+      shouldFailCreateStagingHash = value;
+    },
+    setFinalizeCommitFailure: (value: boolean) => {
+      shouldFailFinalizeCommit = value;
+    },
+    setNextImmediateFailure: (value: boolean) => {
+      failNextImmediate = value;
     },
   };
 }

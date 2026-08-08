@@ -267,6 +267,8 @@ export const assetMutationRequestSchema = z
   .object({ expectedVersion: z.number().int().positive() })
   .strict();
 
+export const assetRetryIngestionRequestSchema = assetMutationRequestSchema;
+
 export const deliveryCapabilityRequestSchema = z
   .object({ operation: deliveryOperationSchema })
   .strict();
@@ -389,6 +391,9 @@ export type InitializeUploadRequest = z.infer<
 export type UploadSession = z.infer<typeof uploadSessionSchema>;
 export type UploadCompleteRequest = z.infer<typeof uploadCompleteRequestSchema>;
 export type AssetMutationRequest = z.infer<typeof assetMutationRequestSchema>;
+export type AssetRetryIngestionRequest = z.infer<
+  typeof assetRetryIngestionRequestSchema
+>;
 export type DeliveryCapabilityRequest = z.infer<
   typeof deliveryCapabilityRequestSchema
 >;

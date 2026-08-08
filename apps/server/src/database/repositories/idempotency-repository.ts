@@ -151,6 +151,19 @@ export class IdempotencyRepository {
       throw new Error("Idempotency failure transition conflict");
   }
 
+  markRetryableForOperation(
+    context: TransactionContext,
+    operation: string,
+  ): number {
+    return Number(
+      context.database
+        .prepare(
+          "UPDATE idempotency_records SET status = 'failed_retryable', response_status = NULL, response_json = NULL, resource_id = NULL WHERE operation = ? AND status = 'in_progress'",
+        )
+        .run(operation).changes,
+    );
+  }
+
   cleanup(context: TransactionContext, now: number, limit = 100): number {
     return Number(
       context.database

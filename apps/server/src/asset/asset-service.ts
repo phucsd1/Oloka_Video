@@ -34,10 +34,9 @@ import type { Clock } from "../kernel/clock.js";
 import type { IdGenerator } from "../kernel/id-generator.js";
 import type { AuthenticatedSession } from "../identity/identity-service.js";
 import { ApplicationError } from "../http/application-error.js";
+import type { QuotaPolicyResolver } from "../quota/quota-policy.js";
 
 export const MAX_CHUNK_SIZE = 8 * 1024 * 1024;
-export const MAX_ASSET_SIZE = 500 * 1024 * 1024;
-export const MAX_PROJECT_STORAGE = 5 * 1024 * 1024 * 1024;
 const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 const ASSET_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const CAPABILITY_TTL_MS = 5 * 60 * 1000;
@@ -48,11 +47,13 @@ export interface AssetServiceOptions {
   applicationKey: Uint8Array;
   clock: Clock;
   idGenerator: IdGenerator;
+  quotaPolicyResolver: QuotaPolicyResolver;
 }
 
 export interface AssetDeliveryDescriptor {
   asset: Asset;
   storageKey: string;
+  capabilityOperation?: "stream" | "preview" | "download";
 }
 
 export class AssetService {
@@ -75,147 +76,174 @@ export class AssetService {
   ): Promise<{ asset: Asset; upload: UploadSession; replayed: boolean }> {
     const normalized = normalizeFilename(request.originalFilename);
     const now = this.options.clock.now();
-    const result = this.options.transactions.run("immediate", (context) => {
-      const begin = this.idempotency.begin(context, {
-        userId: actor.user.id,
-        operation: `asset.upload.initialize:${projectId}`,
-        idempotencyKey,
-        semanticRequestHashSha256: sha256CanonicalJson({
+    const allocatedAssetId = this.options.idGenerator.generate();
+    const allocatedUploadId = this.options.idGenerator.generate();
+    try {
+      await this.options.storage.stage(allocatedUploadId);
+    } catch {
+      throw new ApplicationError("STORAGE_UNAVAILABLE", "upload_stage_failed");
+    }
+    let result;
+    try {
+      result = this.options.transactions.run("immediate", (context) => {
+        assertActiveActor(actor);
+        const begin = this.idempotency.begin(context, {
+          userId: actor.user.id,
+          operation: `asset.upload.initialize:${projectId}`,
+          idempotencyKey,
+          semanticRequestHashSha256: sha256CanonicalJson({
+            projectId,
+            ...request,
+            originalFilename: normalized,
+          }),
+          createdAt: now,
+          expiresAt: now + UPLOAD_TTL_MS,
+        });
+        if (begin.kind === "replay") {
+          const response = begin.response as {
+            asset: Asset;
+            upload: UploadSession;
+          };
+          return { ...response, replayed: true, recordId: undefined };
+        }
+        if (begin.kind !== "started" && begin.kind !== "retryable")
+          throw idempotencyError(begin.kind);
+        const project = context.database
+          .prepare("SELECT owner_user_id, status FROM projects WHERE id = ?")
+          .get(projectId) as
+          | { owner_user_id: string; status: string }
+          | undefined;
+        if (project === undefined || project.owner_user_id !== actor.user.id)
+          throw new ApplicationError("RESOURCE_NOT_FOUND", "project_not_found");
+        if (project.status !== "active")
+          throw new ApplicationError(
+            "RESOURCE_STATE_CONFLICT",
+            "project_not_active",
+          );
+        const quota = this.options.quotaPolicyResolver.resolve({
+          userId: actor.user.id,
           projectId,
-          ...request,
-          originalFilename: normalized,
-        }),
-        createdAt: now,
-        expiresAt: now + UPLOAD_TTL_MS,
-      });
-      if (begin.kind === "replay") {
-        const response = begin.response as {
-          asset: Asset;
-          upload: UploadSession;
-        };
-        return { ...response, replayed: true, recordId: undefined };
-      }
-      if (begin.kind !== "started" && begin.kind !== "retryable")
-        throw idempotencyError(begin.kind);
-      const project = context.database
-        .prepare("SELECT owner_user_id, status FROM projects WHERE id = ?")
-        .get(projectId) as
-        | { owner_user_id: string; status: string }
-        | undefined;
-      if (project === undefined || project.owner_user_id !== actor.user.id)
-        throw new ApplicationError("RESOURCE_NOT_FOUND", "project_not_found");
-      if (project.status !== "active")
-        throw new ApplicationError(
-          "RESOURCE_STATE_CONFLICT",
-          "project_not_active",
-        );
-      if (request.declaredSize > MAX_ASSET_SIZE)
-        throw new ApplicationError("PAYLOAD_TOO_LARGE", "asset_size_limit");
-      const reserved = context.database
-        .prepare(
-          `SELECT COALESCE((SELECT SUM(COALESCE(byte_size, 0)) FROM assets WHERE project_id = ? AND lifecycle_status != 'purged'), 0) +
+          at: now,
+        });
+        if (request.declaredSize > quota.maxAssetSizeBytes)
+          throw new ApplicationError("PAYLOAD_TOO_LARGE", "asset_size_limit");
+        const reserved = context.database
+          .prepare(
+            `SELECT COALESCE((SELECT SUM(COALESCE(byte_size, 0)) FROM assets WHERE project_id = ? AND lifecycle_status != 'purged'), 0) +
                 COALESCE((SELECT SUM(declared_size) FROM upload_sessions WHERE project_id = ? AND status IN ('open','verifying')), 0) AS total`,
+          )
+          .get(projectId, projectId) as { total: number };
+        if (
+          reserved.total + request.declaredSize >
+          quota.maxProjectStorageBytes
         )
-        .get(projectId, projectId) as { total: number };
-      if (reserved.total + request.declaredSize > MAX_PROJECT_STORAGE)
-        throw new ApplicationError("QUOTA_EXCEEDED", "project_storage_limit");
-      const assetId = this.options.idGenerator.generate();
-      const uploadId = this.options.idGenerator.generate();
-      const assetKey = `v1/${assetId.slice(0, 2)}/${assetId}`;
-      const upload: UploadSessionRow = {
-        id: uploadId,
-        project_id: projectId,
-        owner_user_id: actor.user.id,
-        asset_id: assetId,
-        staging_key: uploadId,
-        original_filename: normalized,
-        declared_mime: request.declaredMime ?? null,
-        declared_size: request.declaredSize,
-        declared_checksum_sha256: request.declaredChecksumSha256 ?? null,
-        received_size: 0,
-        last_chunk_offset: null,
-        last_chunk_size: null,
-        last_chunk_checksum_sha256: null,
-        status: "open",
-        expires_at: now + UPLOAD_TTL_MS,
-        created_at: now,
-        updated_at: now,
-        version: 1,
-      };
-      this.assets.createUpload(context, {
-        asset: {
-          id: assetId,
+          throw new ApplicationError("QUOTA_EXCEEDED", "project_storage_limit");
+        const assetId = allocatedAssetId;
+        const uploadId = allocatedUploadId;
+        const assetKey = `v1/${assetId.slice(0, 2)}/${assetId}`;
+        const upload: UploadSessionRow = {
+          id: uploadId,
           project_id: projectId,
           owner_user_id: actor.user.id,
+          asset_id: assetId,
+          staging_key: uploadId,
           original_filename: normalized,
-          kind: request.kind,
           declared_mime: request.declaredMime ?? null,
-          storage_key: assetKey,
+          declared_size: request.declaredSize,
+          declared_checksum_sha256: request.declaredChecksumSha256 ?? null,
+          received_size: 0,
+          last_chunk_offset: null,
+          last_chunk_size: null,
+          last_chunk_checksum_sha256: null,
+          status: "open",
+          expires_at: now + UPLOAD_TTL_MS,
           created_at: now,
           updated_at: now,
-        },
-        upload: {
-          id: upload.id,
-          project_id: upload.project_id,
-          owner_user_id: upload.owner_user_id,
-          asset_id: upload.asset_id,
-          staging_key: upload.staging_key,
-          original_filename: upload.original_filename,
-          declared_mime: upload.declared_mime,
-          declared_size: upload.declared_size,
-          declared_checksum_sha256: upload.declared_checksum_sha256,
-          expires_at: upload.expires_at,
-          created_at: upload.created_at,
-          updated_at: upload.updated_at,
-        },
+          version: 1,
+        };
+        this.assets.createUpload(context, {
+          asset: {
+            id: assetId,
+            project_id: projectId,
+            owner_user_id: actor.user.id,
+            original_filename: normalized,
+            kind: request.kind,
+            declared_mime: request.declaredMime ?? null,
+            storage_key: assetKey,
+            created_at: now,
+            updated_at: now,
+          },
+          upload: {
+            id: upload.id,
+            project_id: upload.project_id,
+            owner_user_id: upload.owner_user_id,
+            asset_id: upload.asset_id,
+            staging_key: upload.staging_key,
+            original_filename: upload.original_filename,
+            declared_mime: upload.declared_mime,
+            declared_size: upload.declared_size,
+            declared_checksum_sha256: upload.declared_checksum_sha256,
+            expires_at: upload.expires_at,
+            created_at: upload.created_at,
+            updated_at: upload.updated_at,
+          },
+        });
+        const asset = this.toAsset(this.assets.getAsset(context, assetId)!);
+        const safeUpload = this.toUpload(
+          this.assets.getUpload(context, uploadId)!,
+          request.kind,
+        );
+        this.audit.append(context, {
+          actorUserId: actor.user.id,
+          actorType: actor.user.role === "admin" ? "admin" : "user",
+          action: "upload.create",
+          resourceType: "asset",
+          resourceId: assetId,
+          outcome: "success",
+          metadata: {
+            projectId,
+            byteSize: request.declaredSize,
+            kind: request.kind,
+          },
+          createdAt: now,
+        });
+        const response = { asset, upload: safeUpload };
+        this.idempotency.complete(context, {
+          recordId: begin.recordId,
+          responseStatus: 201,
+          response,
+          resourceId: assetId,
+        });
+        return { ...response, replayed: false, recordId: begin.recordId };
       });
-      const asset = this.toAsset(this.assets.getAsset(context, assetId)!);
-      const safeUpload = this.toUpload(
-        this.assets.getUpload(context, uploadId)!,
-        request.kind,
-      );
-      this.audit.append(context, {
-        actorUserId: actor.user.id,
-        actorType: actor.user.role === "admin" ? "admin" : "user",
-        action: "upload.create",
-        resourceType: "asset",
-        resourceId: assetId,
-        outcome: "success",
-        metadata: {
-          projectId,
-          byteSize: request.declaredSize,
-          kind: request.kind,
-        },
-        createdAt: now,
-      });
-      const response = { asset, upload: safeUpload };
-      this.idempotency.complete(context, {
-        recordId: begin.recordId,
-        responseStatus: 201,
-        response,
-        resourceId: assetId,
-      });
-      return { ...response, replayed: false, recordId: begin.recordId };
-    });
-    if (result.replayed)
-      return { asset: result.asset, upload: result.upload, replayed: true };
-    try {
-      await this.options.storage.stage(result.upload.uploadId);
-    } catch {
-      this.options.transactions.run("immediate", (context) => {
-        this.assets.markFailed(
-          context,
-          result.asset.id,
+    } catch (error) {
+      await this.options.storage
+        .delete("staging", allocatedUploadId)
+        .catch(() => undefined);
+      throw error;
+    }
+    if (result.replayed) {
+      await this.options.storage
+        .delete("staging", allocatedUploadId)
+        .catch(() => undefined);
+      const current = this.headUpload(actor, result.upload.uploadId);
+      if (current.status !== "open") {
+        throw new ApplicationError(
+          "RESOURCE_STATE_CONFLICT",
+          "upload_initialize_replay_not_open",
+        );
+      }
+      await this.options.storage.statStaging(current.uploadId).catch(() => {
+        throw new ApplicationError(
           "STORAGE_UNAVAILABLE",
-          this.options.clock.now(),
-        );
-        this.assets.abortUpload(
-          context,
-          result.upload.uploadId,
-          this.options.clock.now(),
+          "upload_initialize_replay_staging_missing",
         );
       });
-      throw new ApplicationError("STORAGE_UNAVAILABLE", "upload_stage_failed");
+      return {
+        asset: this.getAsset(actor, result.asset.id),
+        upload: current,
+        replayed: true,
+      };
     }
     return { asset: result.asset, upload: result.upload, replayed: false };
   }
@@ -406,58 +434,113 @@ export class AssetService {
     });
     if (state.kind === "replay")
       return { asset: state.response.asset, replayed: true };
-    const staged = await this.options.storage
-      .statStaging(state.upload.staging_key)
-      .catch(() => {
-        throw new ApplicationError("STORAGE_UNAVAILABLE", "staging_missing");
-      });
-    if (staged.size !== state.upload.declared_size)
-      throw new ApplicationError(
-        "UPLOAD_LENGTH_MISMATCH",
-        "staging_length_mismatch",
-      );
-    const checksum = await this.options.storage.createStagingHash(
-      state.upload.staging_key,
-    );
-    const expectedChecksum =
-      request.declaredChecksumSha256 ?? state.upload.declared_checksum_sha256;
-    if (
-      expectedChecksum !== undefined &&
-      expectedChecksum !== null &&
-      checksum !== expectedChecksum
-    ) {
-      this.rejectUpload(uploadId, state.asset.id, "CHECKSUM_MISMATCH");
-      throw new ApplicationError(
-        "CHECKSUM_MISMATCH",
-        "upload_checksum_mismatch",
-      );
-    }
-    const prefix = await this.options.storage.readStagingPrefix(
-      state.upload.staging_key,
-      32,
-    );
-    const detected = detectMime(
-      prefix,
-      state.asset.kind,
-      state.upload.declared_mime,
-    );
-    if (detected.kind === "unsupported") {
-      this.rejectUpload(uploadId, state.asset.id, "UNSUPPORTED_MEDIA_TYPE");
-      throw new ApplicationError(
-        "UNSUPPORTED_MEDIA_TYPE",
-        "asset_media_unsupported",
-      );
-    }
-    if (detected.kind === "invalid") {
-      this.rejectUpload(uploadId, state.asset.id, "ASSET_INVALID");
-      throw new ApplicationError("ASSET_INVALID", "asset_media_invalid");
-    }
-    const metadata = extractMetadata(prefix, state.asset.kind, staged.size);
-    await this.options.storage.finalize(
-      state.upload.staging_key,
-      state.asset.storage_key,
-    );
+    let finalizationAttempted = false;
+    let terminalRejected = false;
     try {
+      let staged;
+      try {
+        staged = await this.options.storage.statStaging(
+          state.upload.staging_key,
+        );
+      } catch {
+        terminalRejected = true;
+        this.rejectUpload(
+          uploadId,
+          state.asset.id,
+          "STORAGE_UNAVAILABLE",
+          state.recordId,
+        );
+        throw new ApplicationError("STORAGE_UNAVAILABLE", "staging_missing");
+      }
+      if (staged.size !== state.upload.declared_size) {
+        terminalRejected = true;
+        this.rejectUpload(
+          uploadId,
+          state.asset.id,
+          "UPLOAD_LENGTH_MISMATCH",
+          state.recordId,
+        );
+        throw new ApplicationError(
+          "UPLOAD_LENGTH_MISMATCH",
+          "staging_length_mismatch",
+        );
+      }
+      let checksum: string;
+      try {
+        checksum = await this.options.storage.createStagingHash(
+          state.upload.staging_key,
+        );
+      } catch {
+        throw new ApplicationError(
+          "STORAGE_UNAVAILABLE",
+          "staging_hash_failed",
+        );
+      }
+      const expectedChecksum =
+        request.declaredChecksumSha256 ?? state.upload.declared_checksum_sha256;
+      if (
+        expectedChecksum !== undefined &&
+        expectedChecksum !== null &&
+        checksum !== expectedChecksum
+      ) {
+        terminalRejected = true;
+        this.rejectUpload(
+          uploadId,
+          state.asset.id,
+          "CHECKSUM_MISMATCH",
+          state.recordId,
+        );
+        throw new ApplicationError(
+          "CHECKSUM_MISMATCH",
+          "upload_checksum_mismatch",
+        );
+      }
+      let prefix: Buffer;
+      try {
+        prefix = await this.options.storage.readStagingPrefix(
+          state.upload.staging_key,
+          32,
+        );
+      } catch {
+        throw new ApplicationError(
+          "STORAGE_UNAVAILABLE",
+          "staging_read_failed",
+        );
+      }
+      const detected = detectMime(
+        prefix,
+        state.asset.kind,
+        state.upload.declared_mime,
+      );
+      if (detected.kind === "unsupported") {
+        terminalRejected = true;
+        this.rejectUpload(
+          uploadId,
+          state.asset.id,
+          "UNSUPPORTED_MEDIA_TYPE",
+          state.recordId,
+        );
+        throw new ApplicationError(
+          "UNSUPPORTED_MEDIA_TYPE",
+          "asset_media_unsupported",
+        );
+      }
+      if (detected.kind === "invalid") {
+        terminalRejected = true;
+        this.rejectUpload(
+          uploadId,
+          state.asset.id,
+          "ASSET_INVALID",
+          state.recordId,
+        );
+        throw new ApplicationError("ASSET_INVALID", "asset_media_invalid");
+      }
+      const metadata = extractMetadata(prefix, state.asset.kind, staged.size);
+      finalizationAttempted = true;
+      await this.options.storage.finalize(
+        state.upload.staging_key,
+        state.asset.storage_key,
+      );
       this.options.transactions.run("immediate", (context) => {
         if (
           !this.assets.completeUpload(context, {
@@ -503,10 +586,35 @@ export class AssetService {
         });
       });
     } catch (error) {
-      await this.options.storage
-        .delete("durable", state.asset.storage_key)
-        .catch(() => undefined);
-      throw error;
+      if (!terminalRejected) {
+        let restoredToStaging = !finalizationAttempted;
+        if (finalizationAttempted) {
+          try {
+            await this.options.storage.rollbackFinalize(
+              state.upload.staging_key,
+              state.asset.storage_key,
+            );
+            restoredToStaging = true;
+          } catch {
+            restoredToStaging = false;
+          }
+        }
+        if (restoredToStaging) {
+          this.reopenVerifyingUpload(uploadId, state.recordId);
+        } else {
+          this.rejectUpload(
+            uploadId,
+            state.asset.id,
+            "STORAGE_UNAVAILABLE",
+            state.recordId,
+          );
+        }
+      }
+      if (error instanceof ApplicationError) throw error;
+      throw new ApplicationError(
+        "STORAGE_UNAVAILABLE",
+        "upload_finalize_failed",
+      );
     }
     await this.processPendingIngestion(10);
     return { asset: this.getAsset(actor, state.asset.id), replayed: false };
@@ -646,7 +754,11 @@ export class AssetService {
         row.ingestion_status !== "ready"
       )
         return null;
-      return { asset: this.toAsset(row), storageKey: row.storage_key };
+      return {
+        asset: this.toAsset(row),
+        storageKey: row.storage_key,
+        capabilityOperation: operation,
+      };
     });
   }
 
@@ -863,47 +975,183 @@ export class AssetService {
   async retryIngestion(
     actor: AuthenticatedSession,
     assetId: string,
-  ): Promise<Asset> {
-    const row = this.options.transactions.run("immediate", (context) => {
-      const asset = this.assets.getOwnedAsset(context, assetId, actor.user.id);
-      if (asset === null)
-        throw new ApplicationError("RESOURCE_NOT_FOUND", "asset_not_found");
-      if (
-        asset.lifecycle_status !== "active" ||
-        asset.ingestion_status !== "failed"
-      )
-        throw new ApplicationError(
-          "RESOURCE_STATE_CONFLICT",
-          "asset_retry_not_allowed",
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<{ asset: Asset; upload: UploadSession; replayed: boolean }> {
+    const now = this.options.clock.now();
+    const uploadId = this.options.idGenerator.generate();
+    const storageId = this.options.idGenerator.generate();
+    const storageKey = `v1/${storageId.slice(0, 2)}/${storageId}`;
+    try {
+      await this.options.storage.stage(uploadId);
+    } catch {
+      throw new ApplicationError("STORAGE_UNAVAILABLE", "upload_stage_failed");
+    }
+    let result;
+    try {
+      result = this.options.transactions.run("immediate", (context) => {
+        assertActiveActor(actor);
+        const begin = this.idempotency.begin(context, {
+          userId: actor.user.id,
+          operation: `asset.ingestion.retry:${assetId}`,
+          idempotencyKey,
+          semanticRequestHashSha256: sha256CanonicalJson({
+            assetId,
+            expectedVersion,
+          }),
+          createdAt: now,
+          expiresAt: now + UPLOAD_TTL_MS,
+        });
+        if (begin.kind === "replay")
+          return {
+            ...(begin.response as { asset: Asset; upload: UploadSession }),
+            replayed: true,
+          };
+        if (begin.kind !== "started" && begin.kind !== "retryable")
+          throw idempotencyError(begin.kind);
+        const asset = this.assets.getOwnedAsset(
+          context,
+          assetId,
+          actor.user.id,
         );
-      context.database
-        .prepare(
-          "UPDATE assets SET ingestion_status = 'processing', failure_code = NULL, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        if (asset === null)
+          throw new ApplicationError("RESOURCE_NOT_FOUND", "asset_not_found");
+        if (asset.version !== expectedVersion)
+          throw new ApplicationError("VERSION_CONFLICT", "asset_version_stale");
+        if (
+          asset.lifecycle_status !== "active" ||
+          asset.ingestion_status !== "failed" ||
+          asset.failure_code === null
         )
-        .run(this.options.clock.now(), assetId, asset.version);
-      this.audit.append(context, {
-        actorUserId: actor.user.id,
-        actorType: actor.user.role === "admin" ? "admin" : "user",
-        action: "asset.ingestion_retry",
-        resourceType: "asset",
-        resourceId: assetId,
-        outcome: "success",
-        metadata: {},
-        createdAt: this.options.clock.now(),
+          throw new ApplicationError(
+            "RESOURCE_STATE_CONFLICT",
+            "asset_retry_not_allowed",
+          );
+        const project = context.database
+          .prepare("SELECT status FROM projects WHERE id = ?")
+          .get(asset.project_id) as { status: string } | undefined;
+        if (project?.status !== "active")
+          throw new ApplicationError(
+            "RESOURCE_STATE_CONFLICT",
+            "project_not_active",
+          );
+        const previousUpload = this.assets.getUploadByAsset(context, assetId);
+        if (previousUpload === null)
+          throw new ApplicationError(
+            "RESOURCE_STATE_CONFLICT",
+            "asset_retry_session_missing",
+          );
+        const quota = this.options.quotaPolicyResolver.resolve({
+          userId: actor.user.id,
+          projectId: asset.project_id,
+          at: now,
+        });
+        const reserved = context.database
+          .prepare(
+            `SELECT COALESCE((SELECT SUM(COALESCE(byte_size, 0)) FROM assets WHERE project_id = ? AND lifecycle_status != 'purged'), 0) +
+                    COALESCE((SELECT SUM(declared_size) FROM upload_sessions WHERE project_id = ? AND status IN ('open','verifying')), 0) AS total`,
+          )
+          .get(asset.project_id, asset.project_id) as { total: number };
+        if (
+          previousUpload.declared_size > quota.maxAssetSizeBytes ||
+          reserved.total + previousUpload.declared_size >
+            quota.maxProjectStorageBytes
+        )
+          throw new ApplicationError("QUOTA_EXCEEDED", "project_storage_limit");
+        if (
+          !this.assets.retryUpload(context, {
+            assetId,
+            ownerUserId: actor.user.id,
+            expectedAssetVersion: expectedVersion,
+            uploadId,
+            stagingKey: uploadId,
+            storageKey,
+            expiresAt: now + UPLOAD_TTL_MS,
+            now,
+          })
+        )
+          throw new ApplicationError(
+            "RESOURCE_STATE_CONFLICT",
+            "asset_retry_conflict",
+          );
+        const nextAsset = this.toAsset(this.assets.getAsset(context, assetId)!);
+        const nextUpload = this.toUpload(
+          this.assets.getUpload(context, uploadId)!,
+          asset.kind,
+        );
+        this.audit.append(context, {
+          actorUserId: actor.user.id,
+          actorType: actor.user.role === "admin" ? "admin" : "user",
+          action: "asset.ingestion_retry",
+          resourceType: "asset",
+          resourceId: assetId,
+          outcome: "success",
+          metadata: { previousUploadId: previousUpload.id, uploadId },
+          createdAt: now,
+        });
+        const response = { asset: nextAsset, upload: nextUpload };
+        this.idempotency.complete(context, {
+          recordId: begin.recordId,
+          responseStatus: 200,
+          response,
+          resourceId: assetId,
+        });
+        return {
+          ...response,
+          replayed: false,
+          staleStagingKey: previousUpload.staging_key,
+        };
       });
-      return asset;
-    });
-    await this.processIngestion(assetId);
-    return this.getAsset(actor, row.id);
+    } catch (error) {
+      await this.options.storage
+        .delete("staging", uploadId)
+        .catch(() => undefined);
+      throw error;
+    }
+    if (result.replayed) {
+      await this.options.storage
+        .delete("staging", uploadId)
+        .catch(() => undefined);
+      await this.options.storage
+        .statStaging(result.upload.uploadId)
+        .catch(() => {
+          throw new ApplicationError(
+            "STORAGE_UNAVAILABLE",
+            "asset_retry_staging_missing",
+          );
+        });
+    } else if ("staleStagingKey" in result) {
+      await this.options.storage
+        .delete("staging", result.staleStagingKey)
+        .catch(() => undefined);
+    }
+    return result;
   }
 
   issueCapability(
     actor: AuthenticatedSession,
     assetId: string,
     operation: "stream" | "preview" | "download",
+    idempotencyKey: string,
   ): DeliveryCapabilityResponse {
     const now = this.options.clock.now();
     return this.options.transactions.run("immediate", (context) => {
+      assertActiveActor(actor);
+      const begin = this.idempotency.begin(context, {
+        userId: actor.user.id,
+        operation: `asset.capability.issue:${assetId}`,
+        idempotencyKey,
+        semanticRequestHashSha256: sha256CanonicalJson({
+          assetId,
+          operation,
+        }),
+        createdAt: now,
+        expiresAt: now + UPLOAD_TTL_MS,
+      });
+      if (begin.kind === "replay")
+        return deliveryCapabilityResponseSchema.parse(begin.response);
+      if (begin.kind !== "started" && begin.kind !== "retryable")
+        throw idempotencyError(begin.kind);
       const asset = this.assets.getOwnedAsset(context, assetId, actor.user.id);
       if (
         asset === null ||
@@ -939,12 +1187,19 @@ export class AssetService {
         metadata: { operation },
         createdAt: now,
       });
-      return deliveryCapabilityResponseSchema.parse({
+      const response = deliveryCapabilityResponseSchema.parse({
         capability: token,
         expiresAt: new Date(now + CAPABILITY_TTL_MS).toISOString(),
         operation,
         assetId,
       });
+      this.idempotency.complete(context, {
+        recordId: begin.recordId,
+        responseStatus: 200,
+        response,
+        resourceId: assetId,
+      });
+      return response;
     });
   }
 
@@ -976,6 +1231,7 @@ export class AssetService {
     uploadId: string,
     assetId: string,
     failureCode: string,
+    idempotencyRecordId: string,
   ): void {
     this.options.transactions.run("immediate", (context) => {
       this.assets.markFailed(
@@ -989,6 +1245,27 @@ export class AssetService {
           "UPDATE upload_sessions SET status = 'rejected', updated_at = ?, version = version + 1 WHERE id = ? AND status = 'verifying'",
         )
         .run(this.options.clock.now(), uploadId);
+      this.idempotency.markRetryableFailure(context, idempotencyRecordId);
+    });
+  }
+
+  private reopenVerifyingUpload(
+    uploadId: string,
+    idempotencyRecordId: string,
+  ): void {
+    this.options.transactions.run("immediate", (context) => {
+      if (
+        !this.assets.reopenVerifying(
+          context,
+          uploadId,
+          this.options.clock.now(),
+        )
+      )
+        throw new ApplicationError(
+          "RESOURCE_STATE_CONFLICT",
+          "upload_recovery_conflict",
+        );
+      this.idempotency.markRetryableFailure(context, idempotencyRecordId);
     });
   }
 
@@ -1137,6 +1414,17 @@ function idempotencyError(kind: "conflict" | "in_progress"): ApplicationError {
       ? "asset_idempotency_conflict"
       : "asset_idempotency_in_progress",
   );
+}
+
+function assertActiveActor(actor: AuthenticatedSession): void {
+  if (actor.user.status === "active") return;
+  const code =
+    actor.user.status === "pending"
+      ? "ACCOUNT_PENDING"
+      : actor.user.status === "disabled"
+        ? "ACCOUNT_DISABLED"
+        : "ACCOUNT_REJECTED";
+  throw new ApplicationError(code, "account_not_active");
 }
 
 function mutationConflict(

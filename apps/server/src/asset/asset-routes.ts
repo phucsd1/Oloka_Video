@@ -2,9 +2,11 @@ import {
   assetListQuerySchema,
   assetListResponseSchema,
   assetMutationRequestSchema,
+  assetRetryIngestionRequestSchema,
   assetSchema,
   deliveryCapabilityRequestSchema,
   deliveryCapabilityResponseSchema,
+  deliveryOperationSchema,
   initializeUploadRequestSchema,
   uploadCompleteRequestSchema,
   uploadSessionSchema,
@@ -172,14 +174,23 @@ export function registerAssetRoutes(options: RegisterAssetRoutesOptions): void {
     async (request, reply) => {
       const session = requireSession(options, request);
       verifyMutation(options, session, request);
-      parseIdempotencyKey(request.headers["idempotency-key"]);
-      const asset = await requireService(options).retryIngestion(
+      const idempotencyKey = parseIdempotencyKey(
+        request.headers["idempotency-key"],
+      );
+      const command = assetRetryIngestionRequestSchema.parse(request.body);
+      const result = await requireService(options).retryIngestion(
         session,
         parseParameter(request, "assetId"),
+        command.expectedVersion,
+        idempotencyKey,
       );
       return reply
-        .header("etag", `"${asset.version}"`)
-        .send(assetSchema.parse(asset));
+        .header("etag", `"${result.asset.version}"`)
+        .header("idempotency-replayed", result.replayed ? "true" : "false")
+        .send({
+          asset: assetSchema.parse(result.asset),
+          upload: uploadSessionSchema.parse(result.upload),
+        });
     },
   );
 
@@ -198,30 +209,14 @@ export function registerAssetRoutes(options: RegisterAssetRoutesOptions): void {
       .send(assetSchema.parse(asset));
   });
 
-  app.post("/api/v1/assets/:assetId/restore", async (request, reply) => {
-    const session = requireSession(options, request);
-    verifyMutation(options, session, request);
-    const idempotencyKey = parseIdempotencyKey(
-      request.headers["idempotency-key"],
-    );
-    const command = assetMutationRequestSchema.parse(request.body);
-    const asset = requireService(options).restore(
-      session,
-      parseParameter(request, "assetId"),
-      command.expectedVersion,
-      idempotencyKey,
-    );
-    return reply
-      .header("etag", `"${asset.version}"`)
-      .send(assetSchema.parse(asset));
-  });
-
   app.post(
     "/api/v1/assets/:assetId/delivery-capabilities",
     async (request, reply) => {
       const session = requireSession(options, request);
       verifyMutation(options, session, request);
-      parseIdempotencyKey(request.headers["idempotency-key"]);
+      const idempotencyKey = parseIdempotencyKey(
+        request.headers["idempotency-key"],
+      );
       const body = deliveryCapabilityRequestSchema.parse(request.body);
       return reply
         .header("cache-control", "no-store")
@@ -231,6 +226,7 @@ export function registerAssetRoutes(options: RegisterAssetRoutesOptions): void {
               session,
               parseParameter(request, "assetId"),
               body.operation,
+              idempotencyKey,
             ),
           ),
         );
@@ -277,7 +273,10 @@ async function sendContent(
     )
     .header(
       "content-disposition",
-      contentDisposition(descriptor.asset.originalFilename),
+      contentDisposition(
+        descriptor.asset.originalFilename,
+        descriptor.capabilityOperation === "download" ? "attachment" : "inline",
+      ),
     )
     .header("etag", etag)
     .header("last-modified", object.modifiedAt.toUTCString())
@@ -290,7 +289,11 @@ async function sendContent(
     );
   if (headOnly) return response.send();
   return response.send(
-    options.storage.openRange(descriptor.storageKey, range.start, range.end),
+    await options.storage.openRange(
+      descriptor.storageKey,
+      range.start,
+      range.end,
+    ),
   );
 }
 
@@ -299,25 +302,17 @@ function authorizeContent(
   request: FastifyRequest,
   assetId: string,
 ): AssetDeliveryDescriptor {
-  const query = request.query as { capability?: unknown };
+  const query = request.query as { capability?: unknown; operation?: unknown };
   if (typeof query.capability === "string") {
+    const operation = deliveryOperationSchema.safeParse(query.operation);
+    if (!operation.success)
+      throw new ApplicationError("RESOURCE_NOT_FOUND", "capability_invalid");
     const service = requireService(options);
-    const descriptor =
-      service.authorizeCapabilityDelivery(
-        assetId,
-        query.capability,
-        "stream",
-      ) ??
-      service.authorizeCapabilityDelivery(
-        assetId,
-        query.capability,
-        "preview",
-      ) ??
-      service.authorizeCapabilityDelivery(
-        assetId,
-        query.capability,
-        "download",
-      );
+    const descriptor = service.authorizeCapabilityDelivery(
+      assetId,
+      query.capability,
+      operation.data,
+    );
     if (descriptor === null)
       throw new ApplicationError("RESOURCE_NOT_FOUND", "capability_invalid");
     return descriptor;
@@ -362,8 +357,11 @@ function rangeError(size: number): ApplicationError {
   });
 }
 
-function contentDisposition(filename: string): string {
-  return `inline; filename*=UTF-8''${encodeURIComponent(filename)}`;
+function contentDisposition(
+  filename: string,
+  disposition: "inline" | "attachment",
+): string {
+  return `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 function requireSession(
