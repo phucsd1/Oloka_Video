@@ -120,7 +120,7 @@ describe("App", () => {
     expect(screen.queryByText("Continue with Google")).not.toBeInTheDocument();
   });
 
-  it("renders the bounded pending-user queue for an active admin", async () => {
+  it("renders the canonical Project empty state for an active member", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
         new Response(
@@ -128,10 +128,10 @@ describe("App", () => {
             authenticated: true,
             user: {
               id: "00000000-0000-4000-8000-000000000001",
-              email: "admin@example.test",
-              displayName: "Admin",
+              email: "member@example.test",
+              displayName: "Active Member",
               avatarUrl: null,
-              role: "admin",
+              role: "member",
               status: "active",
               version: 1,
             },
@@ -139,8 +139,49 @@ describe("App", () => {
         ),
       )
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ users: [], nextCursor: null })),
+        new Response(JSON.stringify({ projects: [], nextCursor: null })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ projects: [], nextCursor: null })),
       );
+
+    render(<App />);
+
+    expect(await screen.findByText("No projects yet")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Create project" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Trash is empty")).toBeInTheDocument();
+  });
+
+  it("renders the bounded pending-user queue for an active admin", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/auth/session")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              authenticated: true,
+              user: {
+                id: "00000000-0000-4000-8000-000000000001",
+                email: "admin@example.test",
+                displayName: "Admin",
+                avatarUrl: null,
+                role: "admin",
+                status: "active",
+                version: 1,
+              },
+            }),
+          ),
+        );
+      if (url.startsWith("/api/v1/admin/users"))
+        return Promise.resolve(
+          new Response(JSON.stringify({ users: [], nextCursor: null })),
+        );
+      return Promise.resolve(
+        new Response(JSON.stringify({ projects: [], nextCursor: null })),
+      );
+    });
 
     render(<App />);
 
@@ -158,38 +199,58 @@ describe("App", () => {
       status: "pending",
       version: 1,
     } as const;
+    let adminLists = 0;
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            authenticated: true,
-            user: { ...user, role: "admin", status: "active" },
-          }),
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ users: [user], nextCursor: null })),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            csrfToken: "memory-only-csrf-token-value-1234567890",
-          }),
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ user }), { status: 200 }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ users: [], nextCursor: null })),
-      );
+      .mockImplementation((input, init) => {
+        const url = requestUrl(input);
+        if (url === "/api/v1/auth/session")
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                authenticated: true,
+                user: { ...user, role: "admin", status: "active" },
+              }),
+            ),
+          );
+        if (url === "/api/v1/auth/csrf")
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                csrfToken: "memory-only-csrf-token-value-1234567890",
+              }),
+            ),
+          );
+        if (url.startsWith("/api/v1/admin/users/") && init?.method === "PATCH")
+          return Promise.resolve(
+            new Response(JSON.stringify({ user }), { status: 200 }),
+          );
+        if (url.startsWith("/api/v1/admin/users")) {
+          adminLists += 1;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                users: adminLists === 1 ? [user] : [],
+                nextCursor: null,
+              }),
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ projects: [], nextCursor: null })),
+        );
+      });
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
-    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
+    const approvalCall = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        requestUrl(input).startsWith("/api/v1/admin/users/") &&
+        init?.method === "PATCH",
+    );
+    expect(approvalCall?.[1]).toMatchObject({
       headers: expect.objectContaining({
         "x-oloka-csrf": "memory-only-csrf-token-value-1234567890",
       }),
@@ -202,3 +263,9 @@ describe("App", () => {
     );
   });
 });
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
