@@ -1105,7 +1105,9 @@ describe("Asset service", () => {
       });
       fixture.database.transactions.run("immediate", ({ database }) => {
         database
-          .prepare("UPDATE upload_sessions SET declared_mime = 'image/png' WHERE id = ?")
+          .prepare(
+            "UPDATE upload_sessions SET declared_mime = 'image/png' WHERE id = ?",
+          )
           .run(first.upload.uploadId);
       });
       await fixture.service.appendChunk(
@@ -1128,7 +1130,9 @@ describe("Asset service", () => {
       expect(
         fixture.database.transactions.run("read", ({ database }) =>
           database
-            .prepare("SELECT COUNT(*) AS count FROM jobs WHERE type = 'asset_ingestion'")
+            .prepare(
+              "SELECT COUNT(*) AS count FROM jobs WHERE type = 'asset_ingestion'",
+            )
             .get(),
         ),
       ).toEqual({ count: 1 });

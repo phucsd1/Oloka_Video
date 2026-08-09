@@ -55,7 +55,7 @@ export class DurableJobDispatcher {
       DEFAULT_DISPATCHER_OPTIONS.heartbeatIntervalMs;
     this.reconcileIntervalMs =
       options.reconcileIntervalMs ??
-        DEFAULT_DISPATCHER_OPTIONS.reconcileIntervalMs;
+      DEFAULT_DISPATCHER_OPTIONS.reconcileIntervalMs;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 5_000;
     this.random = options.random ?? Math.random;
   }
