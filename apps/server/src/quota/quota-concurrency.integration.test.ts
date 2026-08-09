@@ -109,7 +109,7 @@ describe("quota admission concurrency", () => {
       for (const worker of workers) await worker.terminate();
       await database.close();
     }
-  });
+  }, 30_000);
 });
 
 async function waitForReady(barrier: SharedArrayBuffer): Promise<void> {

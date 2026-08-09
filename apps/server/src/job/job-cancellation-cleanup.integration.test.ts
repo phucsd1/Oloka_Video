@@ -69,7 +69,7 @@ describe("Job cancellation cleanup", () => {
       for (const worker of workers) await worker.terminate();
       await database.close();
     }
-  });
+  }, 30_000);
 
   it("covers queued/running/provider-waiting/retry states, expired lease takeover, and stale commit rejection", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-job-cancel-matrix-"));

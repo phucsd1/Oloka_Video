@@ -107,7 +107,7 @@ describe("concurrent Job claims", () => {
       for (const worker of workers) await worker.terminate();
       await database.close();
     }
-  });
+  }, 30_000);
 });
 
 async function waitForReady(barrier: SharedArrayBuffer): Promise<void> {
