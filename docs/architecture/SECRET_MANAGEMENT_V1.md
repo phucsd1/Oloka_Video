@@ -8,7 +8,9 @@ Actual credentials exist only as Hugging Face Space Secrets exposed to the proce
 HKDF-SHA256 derives versioned 32-byte subkeys with distinct information
 contexts: `oloka/oauth-pkce/v1`, `oloka/csrf/v1`,
 `oloka/cursor-mac/v1`, and `oloka/backup-manifest/v1`. Session IP
-pseudonymization uses its own context `oloka/session-ip-hash/v1`. Salt and key
+pseudonymization uses its own context `oloka/session-ip-hash/v1`. Delivery
+capability bearer reconstruction uses its own context
+`oloka/delivery-capability-token/v1`. Salt and key
 version are deployment-controlled metadata; no derived key is reused across
 purposes. Rotation keeps only the bounded prior versions needed to validate
 unexpired envelopes, cursors, or backups.

@@ -1019,6 +1019,23 @@ export class AssetService {
     idempotencyKey: string,
   ): Promise<{ asset: Asset; upload: UploadSession; replayed: boolean }> {
     const now = this.options.clock.now();
+    const idempotencyInput = {
+      userId: actor.user.id,
+      operation: `asset.ingestion.retry:${assetId}`,
+      idempotencyKey,
+      semanticRequestHashSha256: sha256CanonicalJson({
+        assetId,
+        expectedVersion,
+      }),
+    };
+    assertActiveActor(actor);
+    const lookup = this.options.transactions.run("read", (context) =>
+      this.idempotency.lookup(context, idempotencyInput),
+    );
+    if (lookup.kind === "replay")
+      return this.replayRetriedIngestion(actor, assetId, lookup.response);
+    if (lookup.kind === "conflict" || lookup.kind === "in_progress")
+      throw idempotencyError(lookup.kind);
     const uploadId = this.options.idGenerator.generate();
     const storageId = this.options.idGenerator.generate();
     const storageKey = `v1/${storageId.slice(0, 2)}/${storageId}`;
@@ -1032,13 +1049,7 @@ export class AssetService {
       result = this.options.transactions.run("immediate", (context) => {
         assertActiveActor(actor);
         const begin = this.idempotency.begin(context, {
-          userId: actor.user.id,
-          operation: `asset.ingestion.retry:${assetId}`,
-          idempotencyKey,
-          semanticRequestHashSha256: sha256CanonicalJson({
-            assetId,
-            expectedVersion,
-          }),
+          ...idempotencyInput,
           createdAt: now,
           expiresAt: now + UPLOAD_TTL_MS,
         });
@@ -1152,20 +1163,66 @@ export class AssetService {
       await this.options.storage
         .delete("staging", uploadId)
         .catch(() => undefined);
-      await this.options.storage
-        .statStaging(result.upload.uploadId)
-        .catch(() => {
-          throw new ApplicationError(
-            "STORAGE_UNAVAILABLE",
-            "asset_retry_staging_missing",
-          );
-        });
+      return this.replayRetriedIngestion(actor, assetId, {
+        asset: result.asset,
+        upload: result.upload,
+      });
     } else if ("staleStagingKey" in result) {
       await this.options.storage
         .delete("staging", result.staleStagingKey)
         .catch(() => undefined);
     }
     return result;
+  }
+
+  private async replayRetriedIngestion(
+    actor: AuthenticatedSession,
+    assetId: string,
+    persisted: unknown,
+  ): Promise<{ asset: Asset; upload: UploadSession; replayed: true }> {
+    const response = persisted as { asset?: unknown; upload?: unknown };
+    const persistedAsset = assetSchema.parse(response.asset);
+    const persistedUpload = uploadSessionSchema.parse(response.upload);
+    if (persistedAsset.id !== assetId || persistedUpload.assetId !== assetId) {
+      throw new ApplicationError(
+        "RESOURCE_STATE_CONFLICT",
+        "asset_retry_replay_invalid",
+      );
+    }
+    const current = this.options.transactions.run("read", (context) => {
+      const asset = this.assets.getOwnedAsset(context, assetId, actor.user.id);
+      const upload = this.assets.getOwnedUpload(
+        context,
+        persistedUpload.uploadId,
+        actor.user.id,
+      );
+      const canonicalUpload = this.assets.getUploadByAsset(context, assetId);
+      if (
+        asset === null ||
+        asset.lifecycle_status !== "active" ||
+        upload === null ||
+        upload.asset_id !== assetId ||
+        upload.status !== "open" ||
+        canonicalUpload?.id !== upload.id
+      ) {
+        throw new ApplicationError(
+          "RESOURCE_STATE_CONFLICT",
+          "asset_retry_replay_not_open",
+        );
+      }
+      return {
+        asset: this.toAsset(asset),
+        upload: this.toUpload(upload, asset.kind),
+        stagingKey: upload.staging_key,
+      };
+    });
+    await this.options.storage.statStaging(current.stagingKey).catch(() => {
+      throw new ApplicationError(
+        "STORAGE_UNAVAILABLE",
+        "asset_retry_staging_missing",
+      );
+    });
+    return { asset: current.asset, upload: current.upload, replayed: true };
   }
 
   issueCapability(

@@ -1044,6 +1044,265 @@ describe("Asset service", () => {
     }
   });
 
+  it("replays retry-ingestion without staging when new staging is unavailable", async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = await createFailedAsset(
+        fixture,
+        "retry-stage-unavailable",
+      );
+      const first = await fixture.service.retryIngestion(
+        fixture.actor,
+        failed.asset.id,
+        failed.asset.version,
+        "retry-stage-unavailable-key",
+      );
+      const stagesAfterFirst = fixture.getStageCallCount();
+      fixture.setStageFailure(true);
+
+      const replay = await fixture.service.retryIngestion(
+        fixture.actor,
+        failed.asset.id,
+        failed.asset.version,
+        "retry-stage-unavailable-key",
+      );
+
+      expect(replay).toMatchObject({
+        replayed: true,
+        asset: { id: first.asset.id },
+        upload: { uploadId: first.upload.uploadId },
+      });
+      expect(fixture.getStageCallCount()).toBe(stagesAfterFirst);
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("fails retry-ingestion replay when canonical staging is missing", async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = await createFailedAsset(fixture, "retry-staging-missing");
+      const first = await fixture.service.retryIngestion(
+        fixture.actor,
+        failed.asset.id,
+        failed.asset.version,
+        "retry-staging-missing-key",
+      );
+      await fixture.storage.delete("staging", first.upload.uploadId);
+      const stagesAfterFirst = fixture.getStageCallCount();
+
+      await expect(
+        fixture.service.retryIngestion(
+          fixture.actor,
+          failed.asset.id,
+          failed.asset.version,
+          "retry-staging-missing-key",
+        ),
+      ).rejects.toMatchObject({
+        code: "STORAGE_UNAVAILABLE",
+        message: "asset_retry_staging_missing",
+      });
+      expect(fixture.getStageCallCount()).toBe(stagesAfterFirst);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              `SELECT
+                 (SELECT COUNT(*) FROM upload_sessions WHERE asset_id = ?) AS uploads,
+                 (SELECT COUNT(*) FROM audit_events WHERE action = 'asset.ingestion_retry' AND resource_id = ?) AS audits`,
+            )
+            .get(failed.asset.id, failed.asset.id),
+        ),
+      ).toEqual({ uploads: 1, audits: 1 });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("rejects retry-ingestion semantic conflicts without staging", async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = await createFailedAsset(
+        fixture,
+        "retry-semantic-conflict",
+      );
+      const first = await fixture.service.retryIngestion(
+        fixture.actor,
+        failed.asset.id,
+        failed.asset.version,
+        "retry-semantic-conflict-key",
+      );
+      const stagesAfterFirst = fixture.getStageCallCount();
+
+      await expect(
+        fixture.service.retryIngestion(
+          fixture.actor,
+          failed.asset.id,
+          first.asset.version,
+          "retry-semantic-conflict-key",
+        ),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      expect(fixture.getStageCallCount()).toBe(stagesAfterFirst);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'asset.ingestion_retry' AND resource_id = ?",
+            )
+            .get(failed.asset.id),
+        ),
+      ).toEqual({ count: 1 });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("rejects in-progress retry-ingestion without staging or audit", async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = await createFailedAsset(fixture, "retry-in-progress");
+      const stagesBefore = fixture.getStageCallCount();
+      fixture.database.transactions.run("immediate", (context) => {
+        new IdempotencyRepository({
+          generate: () => "00000000-0000-4000-8000-999999999997",
+        }).begin(context, {
+          userId: fixture.actor.user.id,
+          operation: `asset.ingestion.retry:${failed.asset.id}`,
+          idempotencyKey: "retry-in-progress-key",
+          semanticRequestHashSha256: sha256CanonicalJson({
+            assetId: failed.asset.id,
+            expectedVersion: failed.asset.version,
+          }),
+          createdAt: 1_700_000_000_000,
+          expiresAt: 1_700_086_400_000,
+        });
+      });
+
+      await expect(
+        fixture.service.retryIngestion(
+          fixture.actor,
+          failed.asset.id,
+          failed.asset.version,
+          "retry-in-progress-key",
+        ),
+      ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+      expect(fixture.getStageCallCount()).toBe(stagesBefore);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'asset.ingestion_retry' AND resource_id = ?",
+            )
+            .get(failed.asset.id),
+        ),
+      ).toEqual({ count: 0 });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("keeps one canonical retry attempt and cleans losing staging in a same-key race", async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = await createFailedAsset(fixture, "retry-race");
+      const stagesBefore = fixture.getStageCallCount();
+      const results = await Promise.all([
+        fixture.service.retryIngestion(
+          fixture.actor,
+          failed.asset.id,
+          failed.asset.version,
+          "retry-race-key",
+        ),
+        fixture.service.retryIngestion(
+          fixture.actor,
+          failed.asset.id,
+          failed.asset.version,
+          "retry-race-key",
+        ),
+      ]);
+
+      expect(new Set(results.map((result) => result.asset.id)).size).toBe(1);
+      expect(
+        new Set(results.map((result) => result.upload.uploadId)).size,
+      ).toBe(1);
+      expect(results.map((result) => result.replayed).sort()).toEqual([
+        false,
+        true,
+      ]);
+      expect(fixture.getStageCallCount()).toBe(stagesBefore + 2);
+      expect(await fixture.storage.listForReconciliation()).toMatchObject({
+        staging: [results[0].upload.uploadId],
+      });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              `SELECT
+                 (SELECT COUNT(*) FROM upload_sessions WHERE asset_id = ?) AS uploads,
+                 (SELECT COUNT(*) FROM audit_events WHERE action = 'asset.ingestion_retry' AND resource_id = ?) AS audits,
+                 (SELECT COUNT(*) FROM idempotency_records WHERE operation = ? AND status = 'completed') AS records`,
+            )
+            .get(
+              failed.asset.id,
+              failed.asset.id,
+              `asset.ingestion.retry:${failed.asset.id}`,
+            ),
+        ),
+      ).toEqual({ uploads: 1, audits: 1, records: 1 });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("retries failed-retryable retry-ingestion with fresh staging", async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = await createFailedAsset(fixture, "retry-failed-retryable");
+      const stagesBefore = fixture.getStageCallCount();
+      fixture.database.transactions.run("immediate", (context) => {
+        const repository = new IdempotencyRepository({
+          generate: () => "00000000-0000-4000-8000-999999999996",
+        });
+        const begin = repository.begin(context, {
+          userId: fixture.actor.user.id,
+          operation: `asset.ingestion.retry:${failed.asset.id}`,
+          idempotencyKey: "retry-failed-retryable-key",
+          semanticRequestHashSha256: sha256CanonicalJson({
+            assetId: failed.asset.id,
+            expectedVersion: failed.asset.version,
+          }),
+          createdAt: 1_700_000_000_000,
+          expiresAt: 1_700_086_400_000,
+        });
+        if (begin.kind !== "started") throw new Error("retry seed failed");
+        repository.markRetryableFailure(context, begin.recordId);
+      });
+
+      const retried = await fixture.service.retryIngestion(
+        fixture.actor,
+        failed.asset.id,
+        failed.asset.version,
+        "retry-failed-retryable-key",
+      );
+
+      expect(retried).toMatchObject({
+        replayed: false,
+        asset: { id: failed.asset.id, ingestionStatus: "upload_pending" },
+        upload: { status: "open" },
+      });
+      expect(retried.upload.uploadId).not.toBe(failed.uploadId);
+      expect(fixture.getStageCallCount()).toBe(stagesBefore + 1);
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
   it("aborts and expires uploads without deleting completed durable bytes", async () => {
     const fixture = await createFixture();
     try {
