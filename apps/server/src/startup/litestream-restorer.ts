@@ -30,7 +30,7 @@ export async function restoreWithLitestream(
         "-if-replica-exists",
         databasePath,
       ],
-      { timeout: 30_000 },
+      { timeout: 120_000 },
     );
   } catch {
     throw new Error("Litestream database restore failed");
