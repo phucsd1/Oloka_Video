@@ -20,7 +20,7 @@ describe("restoreWithLitestream", () => {
         "-if-replica-exists",
         "/var/lib/oloka/database/oloka.db",
       ],
-      { timeout: 30_000 },
+      { timeout: 120_000 },
     );
   });
 
