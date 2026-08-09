@@ -24,6 +24,25 @@ export interface ReconcileResult {
   cancelled: number;
 }
 
+export interface ClaimedCancellationCleanup {
+  jobId: string;
+  leaseOwner: string;
+  leaseExpiresAt: number;
+  jobVersion: number;
+}
+
+export interface ClaimedProviderReconciliation {
+  jobId: string;
+  stepId: string;
+  leaseOwner: string;
+  leaseExpiresAt: number;
+  jobVersion: number;
+  stepVersion: number;
+  submissionState: "accepted" | "outcome_unknown";
+  operationId: string | null;
+  idempotencyKeyHashSha256: string;
+}
+
 export interface AssetIngestionFailureInput {
   jobId: string;
   stepId: string;
@@ -158,6 +177,273 @@ export class JobRepository {
       jobVersion: candidate.job_version + 1,
       stepVersion: candidate.step_version + 1,
       attemptCount: candidate.attempt_count + 1,
+    };
+  }
+
+  claimCancellationCleanup(
+    context: TransactionContext,
+    input: { leaseOwner: string; now: number; leaseDurationMs: number },
+  ): ClaimedCancellationCleanup | null {
+    const candidate = context.database
+      .prepare(
+        `SELECT id, version FROM jobs
+         WHERE status = 'cancel_requested'
+           AND (lease_owner IS NULL OR lease_expires_at <= ?)
+         ORDER BY cancel_requested_at, created_at, id LIMIT 1`,
+      )
+      .get(input.now) as { id: string; version: number } | undefined;
+    if (candidate === undefined) return null;
+    const leaseExpiresAt = input.now + input.leaseDurationMs;
+    const update = context.database
+      .prepare(
+        `UPDATE jobs SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?,
+           updated_at = ?, version = version + 1
+         WHERE id = ? AND status = 'cancel_requested'
+           AND (lease_owner IS NULL OR lease_expires_at <= ?) AND version = ?`,
+      )
+      .run(
+        input.leaseOwner,
+        leaseExpiresAt,
+        input.now,
+        input.now,
+        candidate.id,
+        input.now,
+        candidate.version,
+      );
+    if (update.changes !== 1) return null;
+    return {
+      jobId: candidate.id,
+      leaseOwner: input.leaseOwner,
+      leaseExpiresAt,
+      jobVersion: candidate.version + 1,
+    };
+  }
+
+  completeCancellationCleanup(
+    context: TransactionContext,
+    input: {
+      jobId: string;
+      leaseOwner: string;
+      expectedJobVersion: number;
+      now: number;
+    },
+  ): number {
+    const job = context.database
+      .prepare(
+        `UPDATE jobs SET status = 'cancelled', finished_at = ?, lease_owner = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL, updated_at = ?,
+           version = version + 1
+         WHERE id = ? AND status = 'cancel_requested' AND lease_owner = ?
+           AND lease_expires_at > ? AND version = ?`,
+      )
+      .run(
+        input.now,
+        input.now,
+        input.jobId,
+        input.leaseOwner,
+        input.now,
+        input.expectedJobVersion,
+      );
+    if (job.changes !== 1) throw leaseConflict();
+    context.database
+      .prepare(
+        `UPDATE job_steps SET status = 'cancelled', completed_at = ?,
+           lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+           updated_at = ?, version = version + 1
+         WHERE job_id = ? AND status IN ('pending','running','waiting_provider','retry_scheduled')`,
+      )
+      .run(input.now, input.now, input.jobId);
+    this.appendEvent(context, {
+      jobId: input.jobId,
+      type: "job.cancelled",
+      payload: {
+        schemaVersion: 1,
+        jobId: input.jobId,
+        status: "cancelled",
+      },
+      createdAt: input.now,
+    });
+    this.outbox.enqueue(context, {
+      topic: "job.state.changed",
+      aggregateType: "job",
+      aggregateId: input.jobId,
+      payload: {
+        schemaVersion: 1,
+        jobId: input.jobId,
+        status: "cancelled",
+      },
+      availableAt: input.now,
+      createdAt: input.now,
+    });
+    return input.expectedJobVersion + 1;
+  }
+
+  claimWaitingProvider(
+    context: TransactionContext,
+    input: { leaseOwner: string; now: number; leaseDurationMs: number },
+  ): ClaimedProviderReconciliation | null {
+    const candidate = context.database
+      .prepare(
+        `SELECT j.id AS job_id, j.version AS job_version,
+                s.id AS step_id, s.version AS step_version,
+                s.provider_submission_state, s.provider_operation_id,
+                s.provider_idempotency_key_hash_sha256
+         FROM jobs j
+         JOIN job_steps s ON s.job_id = j.id AND s.parent_step_id IS NULL
+         WHERE j.status = 'waiting_provider' AND s.status = 'waiting_provider'
+           AND (j.lease_owner IS NULL OR j.lease_expires_at <= ?)
+           AND (s.lease_owner IS NULL OR s.lease_expires_at <= ?)
+           AND (
+             (s.provider_submission_state = 'accepted' AND s.provider_operation_id IS NOT NULL)
+             OR
+             (s.provider_submission_state = 'outcome_unknown'
+              AND s.provider_operation_id IS NULL
+              AND s.provider_idempotency_key_hash_sha256 IS NOT NULL)
+           )
+         ORDER BY j.updated_at, j.id LIMIT 1`,
+      )
+      .get(input.now, input.now) as
+      | {
+          job_id: string;
+          job_version: number;
+          step_id: string;
+          step_version: number;
+          provider_submission_state: "accepted" | "outcome_unknown";
+          provider_operation_id: string | null;
+          provider_idempotency_key_hash_sha256: string;
+        }
+      | undefined;
+    if (candidate === undefined) return null;
+    const leaseExpiresAt = input.now + input.leaseDurationMs;
+    const job = context.database
+      .prepare(
+        `UPDATE jobs SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?,
+           updated_at = ?, version = version + 1
+         WHERE id = ? AND status = 'waiting_provider'
+           AND (lease_owner IS NULL OR lease_expires_at <= ?) AND version = ?`,
+      )
+      .run(
+        input.leaseOwner,
+        leaseExpiresAt,
+        input.now,
+        input.now,
+        candidate.job_id,
+        input.now,
+        candidate.job_version,
+      );
+    if (job.changes !== 1) return null;
+    const step = context.database
+      .prepare(
+        `UPDATE job_steps SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?,
+           updated_at = ?, version = version + 1
+         WHERE id = ? AND job_id = ? AND status = 'waiting_provider'
+           AND (lease_owner IS NULL OR lease_expires_at <= ?) AND version = ?`,
+      )
+      .run(
+        input.leaseOwner,
+        leaseExpiresAt,
+        input.now,
+        input.now,
+        candidate.step_id,
+        candidate.job_id,
+        input.now,
+        candidate.step_version,
+      );
+    if (step.changes !== 1)
+      throw new Error(
+        "Provider reconciliation Step claim conflict after Job claim",
+      );
+    return {
+      jobId: candidate.job_id,
+      stepId: candidate.step_id,
+      leaseOwner: input.leaseOwner,
+      leaseExpiresAt,
+      jobVersion: candidate.job_version + 1,
+      stepVersion: candidate.step_version + 1,
+      submissionState: candidate.provider_submission_state,
+      operationId: candidate.provider_operation_id,
+      idempotencyKeyHashSha256: candidate.provider_idempotency_key_hash_sha256,
+    };
+  }
+
+  recordProviderLookupFound(
+    context: TransactionContext,
+    input: {
+      jobId: string;
+      stepId: string;
+      leaseOwner: string;
+      expectedStepVersion: number;
+      operationId: string;
+      now: number;
+    },
+  ): number {
+    const step = context.database
+      .prepare(
+        `UPDATE job_steps SET provider_submission_state = 'accepted',
+           provider_operation_id = ?, updated_at = ?, version = version + 1
+         WHERE id = ? AND job_id = ? AND status = 'waiting_provider'
+           AND provider_submission_state = 'outcome_unknown'
+           AND provider_operation_id IS NULL AND lease_owner = ?
+           AND lease_expires_at > ? AND version = ?`,
+      )
+      .run(
+        input.operationId,
+        input.now,
+        input.stepId,
+        input.jobId,
+        input.leaseOwner,
+        input.now,
+        input.expectedStepVersion,
+      );
+    if (step.changes !== 1) throw leaseConflict();
+    return input.expectedStepVersion + 1;
+  }
+
+  releaseWaitingProvider(
+    context: TransactionContext,
+    input: {
+      jobId: string;
+      stepId: string;
+      leaseOwner: string;
+      expectedJobVersion: number;
+      expectedStepVersion: number;
+      now: number;
+    },
+  ): { jobVersion: number; stepVersion: number } {
+    const job = context.database
+      .prepare(
+        `UPDATE jobs SET lease_owner = NULL, lease_expires_at = NULL,
+           heartbeat_at = NULL, updated_at = ?, version = version + 1
+         WHERE id = ? AND status = 'waiting_provider' AND lease_owner = ?
+           AND lease_expires_at > ? AND version = ?`,
+      )
+      .run(
+        input.now,
+        input.jobId,
+        input.leaseOwner,
+        input.now,
+        input.expectedJobVersion,
+      );
+    if (job.changes !== 1) throw leaseConflict();
+    const step = context.database
+      .prepare(
+        `UPDATE job_steps SET lease_owner = NULL, lease_expires_at = NULL,
+           heartbeat_at = NULL, updated_at = ?, version = version + 1
+         WHERE id = ? AND job_id = ? AND status = 'waiting_provider'
+           AND lease_owner = ? AND lease_expires_at > ? AND version = ?`,
+      )
+      .run(
+        input.now,
+        input.stepId,
+        input.jobId,
+        input.leaseOwner,
+        input.now,
+        input.expectedStepVersion,
+      );
+    if (step.changes !== 1) throw leaseConflict();
+    return {
+      jobVersion: input.expectedJobVersion + 1,
+      stepVersion: input.expectedStepVersion + 1,
     };
   }
 
@@ -398,6 +684,66 @@ export class JobRepository {
       );
     if (update.changes !== 1) throw leaseConflict();
     return input.expectedVersion + 1;
+  }
+
+  markWaitingProvider(
+    context: TransactionContext,
+    input: {
+      jobId: string;
+      stepId: string;
+      leaseOwner: string;
+      expectedJobVersion: number;
+      expectedStepVersion: number;
+      now: number;
+    },
+  ): { jobVersion: number; stepVersion: number } {
+    const job = context.database
+      .prepare(
+        `UPDATE jobs SET status = 'waiting_provider', updated_at = ?,
+           version = version + 1
+         WHERE id = ? AND status = 'running' AND lease_owner = ?
+           AND lease_expires_at > ? AND version = ?`,
+      )
+      .run(
+        input.now,
+        input.jobId,
+        input.leaseOwner,
+        input.now,
+        input.expectedJobVersion,
+      );
+    if (job.changes !== 1) throw leaseConflict();
+    const step = context.database
+      .prepare(
+        `UPDATE job_steps SET status = 'waiting_provider', updated_at = ?,
+           version = version + 1
+         WHERE id = ? AND job_id = ? AND status = 'running' AND lease_owner = ?
+           AND lease_expires_at > ? AND version = ?
+           AND provider_submission_state IN ('accepted','outcome_unknown')`,
+      )
+      .run(
+        input.now,
+        input.stepId,
+        input.jobId,
+        input.leaseOwner,
+        input.now,
+        input.expectedStepVersion,
+      );
+    if (step.changes !== 1) throw leaseConflict();
+    this.appendEvent(context, {
+      jobId: input.jobId,
+      type: "step.waiting_provider",
+      payload: {
+        schemaVersion: 1,
+        jobId: input.jobId,
+        stepId: input.stepId,
+        status: "waiting_provider",
+      },
+      createdAt: input.now,
+    });
+    return {
+      jobVersion: input.expectedJobVersion + 1,
+      stepVersion: input.expectedStepVersion + 1,
+    };
   }
 
   completeAssetIngestion(
@@ -677,7 +1023,12 @@ export class JobRepository {
       this.appendEvent(context, {
         jobId: job.id,
         type: "job.queued",
-        payload: { schemaVersion: 1, jobId: job.id, status: "queued" },
+        payload: {
+          schemaVersion: 1,
+          jobId: job.id,
+          status: "queued",
+          requeuedExpired: true,
+        },
         createdAt: now,
       });
       requeued += 1;
@@ -719,41 +1070,7 @@ export class JobRepository {
            AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?`,
       )
       .run(now, now);
-    const cancelledJobs = context.database
-      .prepare(
-        `SELECT id, version FROM jobs
-         WHERE status = 'cancel_requested'
-           AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`,
-      )
-      .all(now) as Array<{ id: string; version: number }>;
-    let cancelled = 0;
-    for (const job of cancelledJobs) {
-      const update = context.database
-        .prepare(
-          `UPDATE jobs SET status = 'cancelled', finished_at = ?,
-             lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-             updated_at = ?, version = version + 1
-           WHERE id = ? AND status = 'cancel_requested' AND version = ?`,
-        )
-        .run(now, now, job.id, job.version);
-      if (update.changes !== 1) continue;
-      context.database
-        .prepare(
-          `UPDATE job_steps SET status = 'cancelled', completed_at = ?,
-             lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-             updated_at = ?, version = version + 1
-           WHERE job_id = ? AND status IN ('pending','running','retry_scheduled')`,
-        )
-        .run(now, now, job.id);
-      this.appendEvent(context, {
-        jobId: job.id,
-        type: "job.cancelled",
-        payload: { schemaVersion: 1, jobId: job.id, status: "cancelled" },
-        createdAt: now,
-      });
-      cancelled += 1;
-    }
-    return { requeued, retried, cancelled };
+    return { requeued, retried, cancelled: 0 };
   }
 
   appendEvent(

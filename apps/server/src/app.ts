@@ -40,6 +40,10 @@ import { JobHandlerRegistry } from "./job/job-handler-registry.js";
 import { AssetIngestionJobHandler } from "./job/handlers/asset-ingestion-job-handler.js";
 import { DurableJobDispatcher } from "./job/durable-job-dispatcher.js";
 import { registerJobRoutes } from "./job/job-routes.js";
+import {
+  JobRetryPolicyRegistry,
+  JobRetryService,
+} from "./job/job-retry-service.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -193,6 +197,13 @@ export async function buildApplication(
       idGenerator,
       applicationKey: environment.appKey as Uint8Array,
       repository: jobRepository,
+      retryService: new JobRetryService({
+        transactions: database.transactions,
+        clock,
+        idGenerator,
+        quotaPolicyResolver,
+        policies: new JobRetryPolicyRegistry([]),
+      }),
       ...(jobDispatcher === undefined
         ? {}
         : { dispatcherSnapshot: () => jobDispatcher.snapshot() }),

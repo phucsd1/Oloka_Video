@@ -18,15 +18,15 @@ Transient safe failures schedule exponential retry while the Asset remains proce
 
 ## Recovery and reconciliation
 
-Startup creates one Job for each v5 `processing` Asset that has no existing Asset-ingestion Job. Periodic reconciliation requeues expired resumable Asset ingestion, activates due retries, preserves `waiting_provider` state and provider identity, and completes durable cancellation cleanup without reopening terminal rows.
+Startup creates one Job for each v5 `processing` Asset that has no existing Asset-ingestion Job through an explicit `actor_type=system` path; it preserves the disabled owner's durable owner ID without granting that owner HTTP access. Periodic reconciliation requeues expired resumable Asset ingestion, activates due retries, preserves `waiting_provider` state and provider identity, and completes durable cancellation cleanup without reopening terminal rows. Cancellation cleanup is leased while the parent remains `cancel_requested`, then commits a guarded terminal transition and cancels unfinished Steps without deleting provider identity.
 
-Provider submission fields are infrastructure scaffolding only. Tests persist `requested` intent before a fake call and then persist `accepted` or `outcome_unknown`; production has no provider adapter or network call.
+Provider submission fields are infrastructure scaffolding only. Tests persist `requested` intent before a fake call and then persist `accepted` or `outcome_unknown`; recovery leases poll an accepted operation or look up an outcome-unknown stable key and never blind-resubmit. Production has no provider adapter or network call.
 
 ## Owner and admin surfaces
 
 Owner routes provide HMAC cursor-bound Job list, detail, steps, event history, cancellation, and durable SSE replay. `Last-Event-ID` is resolved against the authorized Job before streaming. Heartbeats are comments, slow clients are disconnected on backpressure, and disconnect never cancels work. Polling remains the frontend fallback.
 
-Admin routes provide a redacted Job list/detail, audited idempotent reconciliation intent, quota policy history/create, and a bounded operations snapshot. Admin users do not gain blanket access through owner Job routes.
+Admin routes provide a redacted Job list/detail, audited idempotent reconciliation intent, quota policy history/create, and a bounded operations snapshot. The snapshot distinguishes durable reconciliation/redelivery counts from since-process-start counts and includes waiting-provider, cancellation-cleanup, storage-divergence, and dispatcher active/capacity fields. Admin users do not gain blanket access through owner Job routes.
 
 ## Quota
 

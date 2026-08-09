@@ -107,6 +107,26 @@ describe("JobService", () => {
             .get(),
         ),
       ).toEqual({ intents: 1, audits: 1 });
+      for (const [index, status] of (
+        ["failed", "cancelled", "completed"] as const
+      ).entries()) {
+        database.transactions.run("immediate", ({ database: connection }) =>
+          connection
+            .prepare(
+              `UPDATE jobs SET status = ?, progress_basis_points = ?, finished_at = ?, version = ? WHERE id = ?`,
+            )
+            .run(
+              status,
+              status === "completed" ? 10_000 : 123,
+              100 + index,
+              10 + index,
+              jobId,
+            ),
+        );
+        expect(() =>
+          service.cancel(owner, jobId, 10 + index, `terminal-cancel-${status}`),
+        ).toThrowError(/job_not_cancellable/);
+      }
     } finally {
       await database.close();
     }

@@ -20,6 +20,7 @@ import { sha256CanonicalJson } from "../kernel/canonical-json.js";
 import type { Clock } from "../kernel/clock.js";
 import type { IdGenerator } from "../kernel/id-generator.js";
 import type { JobRepository } from "./job-repository.js";
+import type { JobRetryService } from "./job-retry-service.js";
 
 export interface JobServiceOptions {
   transactions: TransactionRunner;
@@ -27,6 +28,7 @@ export interface JobServiceOptions {
   idGenerator: IdGenerator;
   applicationKey: Uint8Array;
   repository: JobRepository;
+  retryService?: JobRetryService;
   dispatcherSnapshot?: () => {
     active: number;
     capacity: number;
@@ -38,11 +40,13 @@ export class JobService {
   private readonly idempotency: IdempotencyRepository;
   private readonly audit: AuditEventRepository;
   private readonly outbox: OutboxRepository;
+  private readonly processStartedAt: number;
 
   constructor(private readonly options: JobServiceOptions) {
     this.idempotency = new IdempotencyRepository(options.idGenerator);
     this.audit = new AuditEventRepository(options.idGenerator);
     this.outbox = new OutboxRepository(options.idGenerator);
+    this.processStartedAt = options.clock.now();
   }
 
   list(actor: AuthenticatedSession, query: JobListQuery) {
@@ -328,6 +332,25 @@ export class JobService {
     });
   }
 
+  retry(
+    actor: AuthenticatedSession,
+    jobId: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ) {
+    if (this.options.retryService === undefined)
+      throw new ApplicationError(
+        "RESOURCE_STATE_CONFLICT",
+        "job_retry_policy_unavailable",
+      );
+    return this.options.retryService.retry(
+      actor,
+      jobId,
+      expectedVersion,
+      idempotencyKey,
+    );
+  }
+
   listAdmin(actor: AuthenticatedSession, query: JobListQuery) {
     assertAdmin(actor);
     const filterHash = sha256CanonicalJson({ admin: actor.user.id, ...query });
@@ -489,6 +512,37 @@ export class JobService {
            FROM outbox_events`,
         )
         .get() as Record<string, number | null>;
+      const waitingProvider = database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM jobs WHERE status = 'waiting_provider'",
+        )
+        .get() as { count: number };
+      const redelivery = database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM outbox_events WHERE attempt_count > 1",
+        )
+        .get() as { count: number };
+      const reconciliation = database
+        .prepare(
+          `SELECT
+             COUNT(*) AS durable,
+             SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS since_start
+           FROM audit_events WHERE action = 'job.reconcile.run'`,
+        )
+        .get(this.processStartedAt) as {
+        durable: number;
+        since_start: number | null;
+      };
+      const requeued = database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM job_events WHERE type = 'job.queued' AND payload_json LIKE '%requeued%'",
+        )
+        .get() as { count: number };
+      const dispatcher = this.options.dispatcherSnapshot?.() ?? {
+        active: 0,
+        capacity: 1,
+        stopping: false,
+      };
       const oldest = jobs.oldest ?? now;
       return operationsSnapshotSchema.parse({
         schemaVersion: 1,
@@ -500,7 +554,15 @@ export class JobService {
         cancelRequested: jobs.cancellations ?? 0,
         outboxPending: outbox.pending ?? 0,
         outboxDead: outbox.dead ?? 0,
-        dispatcherCapacity: this.options.dispatcherSnapshot?.().capacity ?? 1,
+        outboxRedelivery: redelivery.count,
+        reconciliationRunsDurable: reconciliation.durable,
+        reconciliationRunsSinceProcessStart: reconciliation.since_start ?? 0,
+        requeuedExpiredWork: requeued.count,
+        waitingProviderReconciliation: waitingProvider.count,
+        cancellationCleanup: jobs.cancellations ?? 0,
+        assetStorageDivergence: 0,
+        dispatcherActive: dispatcher.active,
+        dispatcherCapacity: dispatcher.capacity,
       });
     });
   }

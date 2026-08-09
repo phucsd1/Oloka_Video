@@ -63,7 +63,7 @@ export function registerJobRoutes(options: RegisterJobRoutesOptions): void {
       ),
     );
   });
-  app.post("/api/v1/jobs/:jobId/retry", (request) => {
+  app.post("/api/v1/jobs/:jobId/retry", (request, reply) => {
     const session = requireProtectedSession(options.identityService, request);
     if (options.identityService === undefined)
       throw new ApplicationError(
@@ -77,14 +77,17 @@ export function registerJobRoutes(options: RegisterJobRoutesOptions): void {
       options.publicOrigin,
     );
     const body = retryJobRequestSchema.parse(request.body);
-    parseIdempotencyKey(request.headers["idempotency-key"]);
-    const job = options.jobService.get(session, parseJobId(request));
-    if (job.version !== body.expectedVersion)
-      throw new ApplicationError("VERSION_CONFLICT", "job_version_stale");
-    throw new ApplicationError(
-      "RESOURCE_STATE_CONFLICT",
-      "job_retry_policy_unavailable",
+    const result = options.jobService.retry(
+      session,
+      parseJobId(request),
+      body.expectedVersion,
+      parseIdempotencyKey(request.headers["idempotency-key"]),
     );
+    return reply
+      .code(result.replayed ? 200 : 201)
+      .header("etag", `"${result.job.version}"`)
+      .header("idempotency-replayed", result.replayed ? "true" : "false")
+      .send(jobSchema.parse(result.job));
   });
   app.post("/api/v1/jobs/:jobId/cancel", (request, reply) => {
     const session = requireProtectedSession(options.identityService, request);
@@ -116,6 +119,13 @@ export function registerJobRoutes(options: RegisterJobRoutesOptions): void {
       typeof lastEventId === "string"
         ? options.jobService.resolveEventSequence(session, jobId, lastEventId)
         : 0;
+    // Resolve ownership and the first replay page before hijacking the socket so
+    // concealed/invalid requests still receive the canonical HTTP error.
+    let replay = options.jobService.listEventsAfter(
+      session,
+      jobId,
+      startSequence,
+    );
     reply.hijack();
     const raw = reply.raw;
     raw.writeHead(200, {
@@ -124,26 +134,16 @@ export function registerJobRoutes(options: RegisterJobRoutesOptions): void {
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
-    const writeEvent = (event: JobEvent): boolean => {
-      const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
-      if (!raw.write(payload)) {
-        raw.destroy();
-        return false;
-      }
-      return true;
-    };
+    const writeEvent = (event: JobEvent): boolean =>
+      writeJobSseEvent(raw, event);
     let lastSequence = startSequence;
     while (true) {
-      const replay = options.jobService.listEventsAfter(
-        session,
-        jobId,
-        lastSequence,
-      );
       for (const event of replay) {
         if (!writeEvent(event)) return;
         lastSequence = event.sequence;
       }
       if (replay.length < 100) break;
+      replay = options.jobService.listEventsAfter(session, jobId, lastSequence);
     }
     const heartbeat = setInterval(() => {
       if (!raw.write(": heartbeat\n\n")) raw.destroy();
@@ -216,6 +216,16 @@ export function registerJobRoutes(options: RegisterJobRoutesOptions): void {
       options.jobService.operations(session),
     );
   });
+}
+
+export function writeJobSseEvent(
+  raw: { write(payload: string): boolean; destroy(): void },
+  event: JobEvent,
+): boolean {
+  const payload = `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.payload)}\n\n`;
+  if (raw.write(payload)) return true;
+  raw.destroy();
+  return false;
 }
 
 function parseJobId(request: FastifyRequest): string {

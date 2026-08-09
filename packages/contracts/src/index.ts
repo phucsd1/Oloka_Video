@@ -365,6 +365,7 @@ export const publicJobEventPayloadSchema = z
     failureCode: z.string().max(100).nullable().optional(),
     retryAt: jobTimestampSchema.optional(),
     assetId: z.uuid().optional(),
+    requeuedExpired: z.boolean().optional(),
   })
   .strict();
 export const jobEventSchema = z
@@ -507,6 +508,14 @@ export const operationsSnapshotSchema = z
     cancelRequested: z.number().int().nonnegative(),
     outboxPending: z.number().int().nonnegative(),
     outboxDead: z.number().int().nonnegative(),
+    outboxRedelivery: z.number().int().nonnegative(),
+    reconciliationRunsDurable: z.number().int().nonnegative(),
+    reconciliationRunsSinceProcessStart: z.number().int().nonnegative(),
+    requeuedExpiredWork: z.number().int().nonnegative(),
+    waitingProviderReconciliation: z.number().int().nonnegative(),
+    cancellationCleanup: z.number().int().nonnegative(),
+    assetStorageDivergence: z.number().int().nonnegative(),
+    dispatcherActive: z.number().int().nonnegative(),
     dispatcherCapacity: z.number().int().positive(),
   })
   .strict();

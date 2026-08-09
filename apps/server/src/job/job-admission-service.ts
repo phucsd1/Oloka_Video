@@ -132,6 +132,29 @@ export class JobAdmissionService {
       return toAdmittedJob(existing);
     }
     this.assertAdmission(context, actor, input, now);
+    return this.createAssetIngestionInTransaction(context, {
+      ownerUserId: actor.user.id,
+      projectId: input.projectId,
+      assetId: input.assetId,
+      actorUserId: actor.user.id,
+      actorType: actor.user.role === "admin" ? "admin" : "user",
+      auditAction: "job.admit",
+      now,
+    });
+  }
+
+  private createAssetIngestionInTransaction(
+    context: TransactionContext,
+    input: {
+      ownerUserId: string;
+      projectId: string;
+      assetId: string;
+      actorUserId?: string;
+      actorType: "user" | "admin" | "system";
+      auditAction: string;
+      now: number;
+    },
+  ): AdmittedJob {
     const jobId = this.options.idGenerator.generate();
     const stepId = this.options.idGenerator.generate();
     context.database
@@ -146,11 +169,11 @@ export class JobAdmissionService {
       .run(
         jobId,
         input.projectId,
-        actor.user.id,
+        input.ownerUserId,
         canonicalizeJson({ schemaVersion: 1, assetId: input.assetId }),
-        now,
-        now,
-        now,
+        input.now,
+        input.now,
+        input.now,
       );
     context.database
       .prepare(
@@ -162,10 +185,10 @@ export class JobAdmissionService {
       .run(
         stepId,
         jobId,
-        now,
+        input.now,
         canonicalizeJson({ schemaVersion: 1, assetId: input.assetId }),
-        now,
-        now,
+        input.now,
+        input.now,
       );
     this.appendEvent(
       context,
@@ -177,25 +200,25 @@ export class JobAdmissionService {
         status: "queued",
         progressBasisPoints: 0,
       },
-      now,
+      input.now,
     );
     this.outbox.enqueue(context, {
       topic: "job.dispatch.requested",
       aggregateType: "job",
       aggregateId: jobId,
       payload: { schemaVersion: 1, jobId },
-      availableAt: now,
-      createdAt: now,
+      availableAt: input.now,
+      createdAt: input.now,
     });
     this.audit.append(context, {
-      actorUserId: actor.user.id,
-      actorType: actor.user.role === "admin" ? "admin" : "user",
-      action: "job.admit",
+      actorUserId: input.actorUserId,
+      actorType: input.actorType,
+      action: input.auditAction,
       resourceType: "job",
       resourceId: jobId,
       outcome: "success",
       metadata: { jobType: "asset_ingestion", assetId: input.assetId },
-      createdAt: now,
+      createdAt: input.now,
     });
     const row = context.database
       .prepare("SELECT * FROM jobs WHERE id = ?")
@@ -208,21 +231,19 @@ export class JobAdmissionService {
     return this.options.transactions.run("immediate", (context) => {
       const rows = context.database
         .prepare(
-          `SELECT a.id AS asset_id, a.project_id, a.owner_user_id,
-                  u.email_normalized, u.display_name, u.avatar_url, u.role, u.version
-           FROM assets a JOIN users u ON u.id = a.owner_user_id
-           WHERE a.ingestion_status = 'processing' AND a.lifecycle_status = 'active'
+          `SELECT a.id AS asset_id, a.project_id, a.owner_user_id
+           FROM assets a
+           JOIN projects p ON p.id = a.project_id
+           WHERE a.ingestion_status = 'processing'
+             AND a.lifecycle_status = 'active'
+             AND p.status = 'active'
+             AND p.owner_user_id = a.owner_user_id
            ORDER BY a.created_at, a.id`,
         )
         .all() as Array<{
         asset_id: string;
         project_id: string;
         owner_user_id: string;
-        email_normalized: string;
-        display_name: string;
-        avatar_url: string | null;
-        role: "member" | "admin";
-        version: number;
       }>;
       let admitted = 0;
       for (const row of rows) {
@@ -234,26 +255,24 @@ export class JobAdmissionService {
           )
           .get(row.asset_id);
         if (existing !== undefined) continue;
-        const actor = {
-          sessionId: `system-reconcile-${row.asset_id}`,
-          user: {
-            id: row.owner_user_id,
-            email: row.email_normalized,
-            displayName: row.display_name,
-            avatarUrl: row.avatar_url,
-            role: row.role,
-            status: "active" as const,
-            version: row.version,
-          },
-        } satisfies AuthenticatedSession;
-        this.admitAssetIngestionInTransaction(
-          context,
-          actor,
-          { projectId: row.project_id, assetId: row.asset_id },
+        this.createAssetIngestionInTransaction(context, {
+          ownerUserId: row.owner_user_id,
+          projectId: row.project_id,
+          assetId: row.asset_id,
+          actorType: "system",
+          auditAction: "job.reconcile_asset_ingestion",
           now,
-        );
+        });
         admitted += 1;
       }
+      this.audit.append(context, {
+        actorType: "system",
+        action: "job.reconcile.run",
+        resourceType: "system",
+        outcome: "success",
+        metadata: { admitted },
+        createdAt: now,
+      });
       return admitted;
     });
   }
