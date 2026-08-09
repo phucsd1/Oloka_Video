@@ -36,6 +36,16 @@ owner list order `favorite DESC, updated_at DESC, id DESC`. Slice 3C does not
 implement purge scheduling/worker side effects despite the later-state schema
 foundation.
 
+### Slice 3D Asset projection
+
+Owner Asset responses expose only the resource/project IDs, normalized original
+filename, kind, declared/verified MIME, immutable byte size/checksum, bounded
+technical metadata, ingestion/lifecycle status, safe failure code, timestamps,
+and optimistic version. They never expose owner columns, storage/staging keys,
+filesystem paths, reconciliation state, or capability hashes. Upload responses
+expose the UploadSession ID, Asset ID, canonical received offset, declared
+length, lifecycle status, expiry, and recommended chunk size only.
+
 ## Common errors
 
 The stable code, status, retryability, message key, action, severity, and allowed
@@ -116,7 +126,6 @@ Legend: `U` authenticated user/owner, `A` administrator, `P` public/operator pro
 | API-058 | `PUT /api/v1/admin/provider-credentials/:referenceId`               | A; provider/purpose/env-name/status/version -> reference                                                                           | 400,403,409         | Idem + Ver                           | admin.provider_ref_update; never writes HF secret            |
 | API-059 | `GET /api/v1/admin/audit-events`                                    | A; cursor/actor/action/resource/time -> redacted events                                                                            | 400,403             | cursor/read-only                     | admin.read_audit                                             |
 | API-060 | `GET /api/v1/admin/operations`                                      | A; none -> queue/lease/outbox/storage/backup health summary                                                                        | 403,503             | read-only snapshot                   | admin.read_operations                                        |
-| API-061 | `POST /api/v1/assets/:assetId/restore`                              | U owner; soft-deleted Asset/version -> restored lifecycle                                                                          | 404,409             | Idem + Ver                           | asset.restore; guarded asset transaction                     |
 | API-062 | `GET /api/v1/trash/projects`                                        | U; cursor -> own soft-deleted/purge-scheduled Projects                                                                             | 400,401             | cursor/read-only                     | none                                                         |
 | API-063 | `GET /api/v1/projects/:projectId/compositions/current`              | U owner; project ID -> selected immutable version or null                                                                          | 404                 | project ETag/read-only               | none                                                         |
 | API-064 | `POST /api/v1/outputs/:outputId/pin`                                | U owner; state version -> pinned state                                                                                             | 404,409             | Idem + Ver                           | output.pin; guarded output-state tx                          |

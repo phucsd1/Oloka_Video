@@ -130,14 +130,12 @@ describe("Slice 3A repositories", () => {
         response: { accepted: true },
       }),
     );
-    const replay = database.transactions.run("immediate", (context) =>
-      repository.begin(context, {
+    const replay = database.transactions.run("read", (context) =>
+      repository.lookup(context, {
         userId,
         operation: "kernel.test",
         idempotencyKey: "raw-client-key",
         semanticRequestHashSha256: requestHash,
-        createdAt: 11,
-        expiresAt: 101,
       }),
     );
     expect(replay).toMatchObject({
@@ -155,6 +153,31 @@ describe("Slice 3A repositories", () => {
           .get("raw-client-key"),
     );
     expect(rawKeyMatches).toEqual({ count: 0 });
+    await database.close();
+  });
+
+  it("looks up absent idempotency keys without creating a record", async () => {
+    const database = await createDatabase();
+    const repository = new IdempotencyRepository({
+      generate: () => "00000000-0000-4000-8000-000000000099",
+    });
+    const lookup = database.transactions.run("read", (context) =>
+      repository.lookup(context, {
+        userId,
+        operation: "kernel.lookup",
+        idempotencyKey: "lookup-only-key",
+        semanticRequestHashSha256: "b".repeat(64),
+      }),
+    );
+
+    expect(lookup).toEqual({ kind: "absent" });
+    expect(
+      database.transactions.run("read", ({ database: connection }) =>
+        connection
+          .prepare("SELECT COUNT(*) AS count FROM idempotency_records")
+          .get(),
+      ),
+    ).toEqual({ count: 0 });
     await database.close();
   });
 

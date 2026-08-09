@@ -24,6 +24,10 @@ import { registerErrorHandler } from "./http/error-handler.js";
 import { ApplicationError } from "./http/application-error.js";
 import { ProjectService } from "./project/project-service.js";
 import { registerProjectRoutes } from "./project/project-routes.js";
+import { AssetService } from "./asset/asset-service.js";
+import { registerAssetRoutes } from "./asset/asset-routes.js";
+import { AssetMaintenanceService } from "./asset/asset-maintenance-service.js";
+import { BaselineQuotaPolicyResolver } from "./quota/quota-policy.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -113,6 +117,70 @@ export async function buildApplication(
     projectService,
     publicOrigin: environment.identity?.publicOrigin,
   });
+  const assetService =
+    environment.appKey === undefined
+      ? undefined
+      : new AssetService({
+          transactions: database.transactions,
+          storage,
+          applicationKey: environment.appKey,
+          clock: new SystemClock(),
+          idGenerator: new UuidIdGenerator(),
+          quotaPolicyResolver: new BaselineQuotaPolicyResolver(),
+        });
+  registerAssetRoutes({
+    app,
+    identityService,
+    assetService,
+    storage,
+    publicOrigin: environment.identity?.publicOrigin,
+  });
+  if (assetService !== undefined) await assetService.processPendingIngestion();
+  const assetIngestionInterval = setInterval(() => {
+    if (assetService !== undefined) {
+      void assetService.processPendingIngestion().catch((error: unknown) => {
+        app.log.error(
+          {
+            event: "asset.ingestion.failed",
+            errorType: error instanceof Error ? error.name : "UnknownError",
+          },
+          "Asset ingestion handoff failed",
+        );
+      });
+    }
+  }, 1_000);
+  assetIngestionInterval.unref();
+  const assetMaintenance = new AssetMaintenanceService(
+    database.transactions,
+    storage,
+  );
+  await assetMaintenance.run(Date.now());
+  const assetMaintenanceInterval = setInterval(() => {
+    void assetMaintenance.run(Date.now()).then(
+      (result) => {
+        if (
+          result.quarantinedDatabaseAhead > 0 ||
+          result.missingDurable > 0 ||
+          result.unreferencedDurable > 0
+        ) {
+          app.log.error(
+            { event: "asset.reconciliation.incident", ...result },
+            "Asset reconciliation found storage divergence",
+          );
+        }
+      },
+      (error: unknown) => {
+        app.log.error(
+          {
+            event: "asset.reconciliation.failed",
+            errorType: error instanceof Error ? error.name : "UnknownError",
+          },
+          "Asset reconciliation failed",
+        );
+      },
+    );
+  }, 60_000);
+  assetMaintenanceInterval.unref();
   const identityMaintenance = new IdentityMaintenanceService(
     database.transactions,
   );
@@ -151,6 +219,8 @@ export async function buildApplication(
 
   app.addHook("onClose", async () => {
     clearInterval(identityMaintenanceInterval);
+    clearInterval(assetMaintenanceInterval);
+    clearInterval(assetIngestionInterval);
     await Promise.all([storage.close(), database.close()]);
   });
 

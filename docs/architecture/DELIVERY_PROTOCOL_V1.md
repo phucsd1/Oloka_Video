@@ -1,5 +1,7 @@
 # Delivery Protocol V1
 
+Status: Slice 3D implementation in review; production cutover pending.
+
 ## Authorization path
 
 No route exposes `/data` or accepts a storage key. A delivery request follows:

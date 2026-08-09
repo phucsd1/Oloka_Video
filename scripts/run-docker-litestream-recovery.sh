@@ -137,7 +137,7 @@ stop_boot() {
   echo "boot_container=$container shutdown_seconds=$elapsed secret_scan=pass"
 }
 
-prepare_v3_database() {
+prepare_v4_database() {
   local local_volume="$1"
   docker run --rm --entrypoint node \
     -v "$local_volume:/var/lib/oloka" "$image" --input-type=module -e '
@@ -150,6 +150,7 @@ prepare_v3_database() {
       const v1 = readFileSync("/app/apps/server/migrations/0001-foundation-system-tables.sql");
       const v2 = readFileSync("/app/apps/server/migrations/0002-persistence-kernel.sql");
       const v3 = readFileSync("/app/apps/server/migrations/0003-identity-and-approval.sql");
+      const v4 = readFileSync("/app/apps/server/migrations/0004-canonical-project.sql");
       database.exec(v1.toString("utf8"));
       database.exec(v2.toString("utf8"));
       database.prepare(`INSERT INTO schema_migrations
@@ -166,6 +167,14 @@ prepare_v3_database() {
           "identity-and-approval",
           createHash("sha256").update(v3).digest("hex"),
           "slice-3b-docker-fixture",
+        );
+      database.exec(v4.toString("utf8"));
+      database.prepare(`INSERT INTO schema_migrations
+        (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+        VALUES (4, ?, ?, 4, 0, ?)`).run(
+          "canonical-project",
+          createHash("sha256").update(v4).digest("hex"),
+          "slice-3c-docker-fixture",
         );
       database.close();
     '
@@ -434,7 +443,7 @@ for boot in 1 2 3; do
   docker volume create "$local_volume" >/dev/null
   mode="restore-required"
   if [ "$boot" -eq 1 ]; then mode="fresh-if-replica-missing"; fi
-  if [ "$boot" -eq 1 ]; then prepare_v3_database "$local_volume"; fi
+  if [ "$boot" -eq 1 ]; then prepare_v4_database "$local_volume"; fi
   container="$(start_boot "$boot" "$mode" "$local_volume")"
   if [ "$boot" -eq 1 ]; then seed_identity_state "$container"; create_project_state "$container"; fi
   if [ "$boot" -eq 2 ]; then transition_member_state "$container"; soft_delete_project "$container"; fi
@@ -450,12 +459,12 @@ for boot in 1 2 3; do
   docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e '
     const d=JSON.parse(require("fs").readFileSync(0,"utf8"));
     const boot=Number(process.argv[1]);
-    const expectedTables=["audit_events","idempotency_records","oauth_identities","oauth_transactions","outbox_events","projects","provider_credential_references","schema_migrations","sessions","system_metadata","users"];
+    const expectedTables=["assets","audit_events","delivery_capabilities","idempotency_records","oauth_identities","oauth_transactions","outbox_events","projects","provider_credential_references","schema_migrations","sessions","system_metadata","upload_sessions","users"];
     const expectedMemberStatus=boot === 1 ? "pending" : "active";
     const expectedMemberSession=boot === 1 ? "active" : "revoked";
     const valid=d.metadataVersion === d.witness.startupCount && d.quickCheck === "ok" && d.foreignKeyFailures === 0 &&
-      JSON.stringify(d.ledger.map(row=>row.version)) === JSON.stringify([1,2,3,4]) &&
-      JSON.stringify(d.ledger.map(row=>row.name)) === JSON.stringify(["foundation_system_tables","persistence-kernel","identity-and-approval","canonical-project"]) &&
+      JSON.stringify(d.ledger.map(row=>row.version)) === JSON.stringify([1,2,3,4,5]) &&
+      JSON.stringify(d.ledger.map(row=>row.name)) === JSON.stringify(["foundation_system_tables","persistence-kernel","identity-and-approval","canonical-project","private-assets"]) &&
       JSON.stringify(d.coreTables) === JSON.stringify(expectedTables) &&
       JSON.stringify(d.litestreamTables) === JSON.stringify(["_litestream_lock","_litestream_seq"]) &&
       d.identities.length === 2 && d.users.length === 2 && d.sessions.length === 2 &&
@@ -475,7 +484,7 @@ for boot in 1 2 3; do
     test "$current_first_started_at" = "$first_started_at"
     test "$current_ledger" = "$ledger_json"
   fi
-  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4 project_persistence=pass identity_persistence=pass quick_check=ok foreign_keys=0"
+  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4,5 project_persistence=pass identity_persistence=pass quick_check=ok foreign_keys=0"
   docker rm "$container" >/dev/null
   docker volume rm "$local_volume" >/dev/null
 done
@@ -491,12 +500,12 @@ docker run --rm --entrypoint node -v "$object_volume:/data" "$image" --input-typ
     join(root, entries[0]),
     Buffer.from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "base64url"),
   );
-  if (manifest.sourceSchemaVersion !== 3 || manifest.targetSchemaVersion !== 4 ||
-      JSON.stringify(manifest.migrationVersionsPending) !== JSON.stringify([4])) {
+  if (manifest.sourceSchemaVersion !== 4 || manifest.targetSchemaVersion !== 5 ||
+      JSON.stringify(manifest.migrationVersionsPending) !== JSON.stringify([5])) {
     process.exit(1);
   }
-  process.stdout.write("verified_pre_migration_backup=v3-to-v4\n");
+  process.stdout.write("verified_pre_migration_backup=v4-to-v5\n");
 '
 remaining_replica_objects="$(mc "ls --recursive ci/$bucket/$prefix | wc -l" | tr -d '[:space:]')"
 test "$remaining_replica_objects" -gt 0
-echo "replica_objects=$remaining_replica_objects single_verified_v4_backup=pass recovery_test=pass"
+echo "replica_objects=$remaining_replica_objects single_verified_v5_backup=pass recovery_test=pass"

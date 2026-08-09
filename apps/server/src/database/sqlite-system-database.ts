@@ -166,6 +166,10 @@ export class SqliteSystemDatabase implements SystemDatabase {
       }
       if (currentVersion === 3) {
         this.applyCanonicalProjectMigration(migrations[3]);
+        currentVersion = 4;
+      }
+      if (currentVersion === 4) {
+        this.applyPrivateAssetsMigration(migrations[4]);
       }
       this.verifyAppliedMigrations(migrations);
       this.migrationFailure = undefined;
@@ -226,6 +230,11 @@ export class SqliteSystemDatabase implements SystemDatabase {
     return Promise.resolve();
   }
 
+  /** Checkpoint WAL pages before a filesystem-level database snapshot. */
+  checkpoint(): void {
+    this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
   private applyConnectionPragmas(): void {
     this.database.exec(
       "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
@@ -284,7 +293,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
       this.assertExactFoundationColumns();
       return;
     }
-    if (version === 2 || version === 3 || version === 4) {
+    if (version >= 2 && version <= 5) {
       const expectedTables =
         version === 2
           ? [
@@ -308,19 +317,36 @@ export class SqliteSystemDatabase implements SystemDatabase {
                 "system_metadata",
                 "users",
               ]
-            : [
-                "audit_events",
-                "idempotency_records",
-                "oauth_identities",
-                "oauth_transactions",
-                "outbox_events",
-                "projects",
-                "provider_credential_references",
-                "schema_migrations",
-                "sessions",
-                "system_metadata",
-                "users",
-              ];
+            : version === 4
+              ? [
+                  "audit_events",
+                  "idempotency_records",
+                  "oauth_identities",
+                  "oauth_transactions",
+                  "outbox_events",
+                  "projects",
+                  "provider_credential_references",
+                  "schema_migrations",
+                  "sessions",
+                  "system_metadata",
+                  "users",
+                ]
+              : [
+                  "assets",
+                  "audit_events",
+                  "delivery_capabilities",
+                  "idempotency_records",
+                  "oauth_identities",
+                  "oauth_transactions",
+                  "outbox_events",
+                  "projects",
+                  "provider_credential_references",
+                  "schema_migrations",
+                  "sessions",
+                  "system_metadata",
+                  "upload_sessions",
+                  "users",
+                ];
       const applicationTables = tables.filter(
         (table) => !table.startsWith("_litestream_"),
       );
@@ -499,6 +525,31 @@ export class SqliteSystemDatabase implements SystemDatabase {
     });
   }
 
+  private applyPrivateAssetsMigration(
+    migration: MigrationAsset | undefined,
+  ): void {
+    if (migration?.version !== 5)
+      throw new Error("Private Asset migration is missing");
+    const startedAt = this.clock.now();
+    this.transactions.run("immediate", ({ database }) => {
+      database.exec(migration.sql);
+      database
+        .prepare(
+          `INSERT INTO schema_migrations
+            (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          migration.version,
+          migration.name,
+          migration.checksum,
+          this.clock.now(),
+          Math.max(0, this.clock.now() - startedAt),
+          this.appBuildSha,
+        );
+    });
+  }
+
   private verifyAppliedMigrations(migrations: MigrationAsset[]): void {
     const rows = this.database
       .prepare(
@@ -545,6 +596,7 @@ async function loadMigrationAssets(): Promise<MigrationAsset[]> {
     [2, "persistence-kernel", "0002-persistence-kernel.sql"],
     [3, "identity-and-approval", "0003-identity-and-approval.sql"],
     [4, "canonical-project", "0004-canonical-project.sql"],
+    [5, "private-assets", "0005-private-assets.sql"],
   ] as const;
   return Promise.all(
     definitions.map(async ([version, name, filename]) => {

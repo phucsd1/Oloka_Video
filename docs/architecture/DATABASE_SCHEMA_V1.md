@@ -1,6 +1,6 @@
 # Database Schema V1
 
-Status: logical schema blueprint. Project migration v4 is implementation in review; production remains on schema v3 pending a separate cutover.
+Status: logical schema blueprint. Project migration v4 is in production. Private Asset migration v5 is implementation in review; its production cutover remains pending.
 
 ## Conventions
 

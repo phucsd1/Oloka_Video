@@ -1,5 +1,7 @@
 # Object Storage V1
 
+Status: Slice 3D implementation in review; production cutover pending.
+
 ## Scope
 
 The MVP object adapter stores durable bytes beneath `OBJECT_STORAGE_ROOT` (production `/data`) and temporary upload bytes beneath its staging area. Runtime bytes are never written to Git and are not served by a public static mount. The live SQLite primary is explicitly outside this root at `/var/lib/oloka/database/oloka.db`; `/data/database/oloka-dev.db` is legacy evidence only.
@@ -26,7 +28,7 @@ The MVP object adapter stores durable bytes beneath `OBJECT_STORAGE_ROOT` (produ
 
 1. Close the staging handle and flush file data/metadata when required by the platform.
 2. Verify actual size, SHA-256 byte checksum, and allowed MIME evidence outside any database transaction.
-3. Atomically rename on the same filesystem to the fresh opaque key preallocated at Asset/upload initialization; exclusive creation prevents overwrite.
+3. Claim the fresh opaque key preallocated at Asset/upload initialization with a same-filesystem no-clobber primitive (hard-link, flush, then unlink staging); exclusive creation prevents overwrite.
 4. In a short guarded transaction, update the existing Asset identity from
    upload state to `processing`, complete the UploadSession, and emit the
    ingestion Job/outbox/audit events. Finalize never creates a second Asset.
