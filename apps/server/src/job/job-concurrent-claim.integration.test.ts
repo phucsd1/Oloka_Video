@@ -63,13 +63,7 @@ describe("concurrent Job claims", () => {
           new URL("./job-concurrent-claim.worker.ts", import.meta.url),
           {
             workerData: { databasePath, leaseOwner, barrier },
-            execArgv: [
-              "--import",
-              new URL(
-                "../../../../node_modules/tsx/dist/loader.mjs",
-                import.meta.url,
-              ).href,
-            ],
+            execArgv: ["--experimental-strip-types"],
           },
         ),
     );

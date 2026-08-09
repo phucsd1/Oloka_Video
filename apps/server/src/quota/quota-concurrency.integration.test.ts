@@ -64,13 +64,7 @@ describe("quota admission concurrency", () => {
             stepId,
             assetId,
           },
-          execArgv: [
-            "--import",
-            new URL(
-              "../../../../node_modules/tsx/dist/loader.mjs",
-              import.meta.url,
-            ).href,
-          ],
+          execArgv: ["--experimental-strip-types"],
         }),
     );
     const results = workers.map(
