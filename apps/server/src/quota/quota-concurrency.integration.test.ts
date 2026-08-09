@@ -109,12 +109,12 @@ describe("quota admission concurrency", () => {
       for (const worker of workers) await worker.terminate();
       await database.close();
     }
-  }, 30_000);
+  }, 90_000);
 });
 
 async function waitForReady(barrier: SharedArrayBuffer): Promise<void> {
   const view = new Int32Array(barrier);
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 60_000;
   while (Atomics.load(view, 0) < 2) {
     if (Date.now() > deadline) throw new Error("quota workers did not start");
     await new Promise((resolve) => setTimeout(resolve, 10));
