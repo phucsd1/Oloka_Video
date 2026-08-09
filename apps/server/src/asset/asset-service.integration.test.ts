@@ -109,6 +109,51 @@ describe("Asset service", () => {
     }
   });
 
+  it("does not double-count consumed upload evidence with committed Asset bytes", async () => {
+    const fixture = await createFixture({
+      maxAssetSizeBytes: PNG.length,
+      maxProjectStorageBytes: PNG.length + 1,
+    });
+    try {
+      const initialized = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "committed.png",
+          kind: "image",
+          declaredMime: "image/png",
+          declaredSize: PNG.length,
+        },
+        "committed-upload",
+      );
+      await fixture.service.appendChunk(
+        fixture.actor,
+        initialized.upload.uploadId,
+        0,
+        PNG,
+        checksum(PNG),
+      );
+      await fixture.service.completeUpload(
+        fixture.actor,
+        initialized.upload.uploadId,
+        {},
+        "committed-complete",
+      );
+
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          { originalFilename: "one-byte.font", kind: "font", declaredSize: 1 },
+          "one-byte-upload",
+        ),
+      ).resolves.toMatchObject({ upload: { declaredSize: 1 } });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
   it("replays completed upload initialization when new staging is unavailable", async () => {
     const fixture = await createFixture();
     try {
@@ -487,7 +532,7 @@ describe("Asset service", () => {
         ),
       ).resolves.toMatchObject({
         replayed: false,
-        asset: { ingestionStatus: "ready" },
+        asset: { ingestionStatus: "processing" },
       });
     } finally {
       await fixture.database.close();
@@ -546,10 +591,21 @@ describe("Asset service", () => {
         {},
         "upload-complete-1",
       );
+      await expect(
+        fixture.service.completeUpload(
+          fixture.actor,
+          initialized.upload.uploadId,
+          {},
+          "upload-complete-1",
+        ),
+      ).resolves.toMatchObject({
+        replayed: true,
+        job: { type: "asset_ingestion" },
+      });
 
       expect(completed.asset).toMatchObject({
         id: initialized.asset.id,
-        ingestionStatus: "ready",
+        ingestionStatus: "processing",
         lifecycleStatus: "active",
         verifiedMime: "image/png",
         byteSize: PNG.length,
@@ -558,9 +614,16 @@ describe("Asset service", () => {
       expect(completed.asset.metadata).toMatchObject({ width: 1, height: 1 });
       expect(
         fixture.database.transactions.run("read", ({ database }) =>
-          database.prepare("SELECT COUNT(*) AS count FROM assets").get(),
+          database
+            .prepare(
+              `SELECT
+                 (SELECT COUNT(*) FROM assets) AS assets,
+                 (SELECT COUNT(*) FROM jobs WHERE type = 'asset_ingestion') AS jobs,
+                 (SELECT status FROM quota_reservations WHERE resource_type = 'upload_bytes' AND resource_id = ?) AS reservation_status`,
+            )
+            .get(initialized.upload.uploadId),
         ),
-      ).toEqual({ count: 1 });
+      ).toEqual({ assets: 1, jobs: 1, reservation_status: "consumed" });
     } finally {
       await fixture.database.close();
       await fixture.storage.close();
@@ -688,6 +751,11 @@ describe("Asset service", () => {
           "capability-complete",
         )
       ).asset;
+      await fixture.service.processIngestion(ready.id);
+      const readyAfterIngestion = fixture.service.getAsset(
+        fixture.actor,
+        ready.id,
+      );
       const capability = fixture.service.issueCapability(
         fixture.actor,
         ready.id,
@@ -723,7 +791,7 @@ describe("Asset service", () => {
       const deleted = fixture.service.softDelete(
         fixture.actor,
         ready.id,
-        ready.version,
+        readyAfterIngestion.version,
         "delete-capability-asset",
       );
       expect(deleted.lifecycleStatus).toBe("soft_deleted");
@@ -1014,6 +1082,20 @@ describe("Asset service", () => {
         upload: { status: "open", receivedSize: 0 },
       });
       expect(first.upload.uploadId).not.toBe(failed.uploadId);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              `SELECT resource_id, status FROM quota_reservations
+               WHERE resource_type = 'upload_bytes' AND resource_id IN (?, ?)
+               ORDER BY resource_id`,
+            )
+            .all(failed.uploadId, first.upload.uploadId),
+        ),
+      ).toEqual([
+        { resource_id: failed.uploadId, status: "released" },
+        { resource_id: first.upload.uploadId, status: "reserved" },
+      ]);
       await expect(
         fixture.storage.statStaging(failed.uploadId),
       ).rejects.toThrow();
@@ -1021,6 +1103,35 @@ describe("Asset service", () => {
         replayed: true,
         upload: { uploadId: first.upload.uploadId },
       });
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare("UPDATE upload_sessions SET declared_mime = 'image/png' WHERE id = ?")
+          .run(first.upload.uploadId);
+      });
+      await fixture.service.appendChunk(
+        fixture.actor,
+        first.upload.uploadId,
+        0,
+        PNG,
+        checksum(PNG),
+      );
+      const completed = await fixture.service.completeUpload(
+        fixture.actor,
+        first.upload.uploadId,
+        {},
+        "retry-ingestion-complete",
+      );
+      expect(completed.job).toMatchObject({
+        type: "asset_ingestion",
+        status: "queued",
+      });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT COUNT(*) AS count FROM jobs WHERE type = 'asset_ingestion'")
+            .get(),
+        ),
+      ).toEqual({ count: 1 });
       expect(
         fixture.database.transactions.run("read", ({ database }) =>
           database
@@ -1588,14 +1699,14 @@ async function createReadyAsset(
     PNG,
     checksum(PNG),
   );
-  return (
-    await fixture.service.completeUpload(
-      fixture.actor,
-      initialized.upload.uploadId,
-      {},
-      `${key}-complete`,
-    )
-  ).asset;
+  const completed = await fixture.service.completeUpload(
+    fixture.actor,
+    initialized.upload.uploadId,
+    {},
+    `${key}-complete`,
+  );
+  await fixture.service.processIngestion(completed.asset.id);
+  return fixture.service.getAsset(fixture.actor, completed.asset.id);
 }
 
 async function createFailedAsset(

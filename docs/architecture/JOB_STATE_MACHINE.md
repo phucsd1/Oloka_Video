@@ -1,5 +1,7 @@
 # Durable Job State Machine
 
+Status: the exhaustive Job and JobStep transition matrices are implemented for Phase 3E review; production remains schema v5.
+
 ## Decision
 
 Generation and render are subtypes of a generic durable Job aggregate. The common aggregate owns state, lease, heartbeat, attempts, idempotency, cancellation, timeout, progress, errors, and JobStep records. `GenerationJob` orchestrates the end-to-end flow; `RenderJob` is created or reused as its child at `submit_render` and can also be requested independently for an existing CompositionVersion.

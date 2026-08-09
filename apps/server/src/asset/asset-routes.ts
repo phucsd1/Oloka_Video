@@ -8,6 +8,7 @@ import {
   deliveryCapabilityResponseSchema,
   deliveryOperationSchema,
   initializeUploadRequestSchema,
+  jobSchema,
   uploadCompleteRequestSchema,
   uploadSessionSchema,
 } from "@oloka/contracts";
@@ -128,7 +129,12 @@ export function registerAssetRoutes(options: RegisterAssetRoutesOptions): void {
       .header("cache-control", "no-store")
       .header("etag", `"${result.asset.version}"`)
       .header("idempotency-replayed", result.replayed ? "true" : "false")
-      .send(assetSchema.parse(result.asset));
+      .send({
+        ...assetSchema.parse(result.asset),
+        ...(result.job === undefined
+          ? {}
+          : { job: jobSchema.parse(result.job) }),
+      });
   });
 
   app.delete("/api/v1/uploads/:uploadId", async (request, reply) => {

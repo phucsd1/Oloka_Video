@@ -5,11 +5,15 @@ import {
   authSessionResponseSchema,
   csrfResponseSchema,
   errorEnvelopeSchema,
+  jobEventHistoryResponseSchema,
+  jobListResponseSchema,
+  jobSchema,
   projectListResponseSchema,
   projectSchema,
   uploadSessionSchema,
   type Asset,
   type IdentityUser,
+  type Job,
   type Project,
 } from "@oloka/contracts";
 import { Surface } from "@oloka/design-system";
@@ -329,10 +333,155 @@ function ActiveState(props: {
         </button>
       </section>
       <ProjectWorkspace getCsrfToken={props.getCsrfToken} />
+      <JobActivity getCsrfToken={props.getCsrfToken} />
       {props.user.role === "admin" && (
         <AdminApprovalPanel getCsrfToken={props.getCsrfToken} />
       )}
     </div>
+  );
+}
+
+function JobActivity(props: { getCsrfToken: () => Promise<string> }) {
+  const [jobs, setJobs] = useState<Job[] | null>(null);
+  const [history, setHistory] = useState<Record<string, string[]>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const result = jobListResponseSchema.parse(
+        await getJson("/api/v1/jobs?limit=10"),
+      );
+      setJobs(result.jobs);
+      setError(null);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Job activity failed",
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const poll = window.setInterval(() => void refresh(), 5_000);
+    return () => window.clearInterval(poll);
+  }, [refresh]);
+
+  useEffect(() => {
+    const streams = (jobs ?? [])
+      .filter(
+        (job) => !["completed", "failed", "cancelled"].includes(job.status),
+      )
+      .map((job) => {
+        const stream = new EventSource(`/api/v1/jobs/${job.id}/events`);
+        stream.onmessage = () => void refresh();
+        stream.addEventListener("job.progress", () => void refresh());
+        stream.addEventListener("job.succeeded", () => void refresh());
+        stream.addEventListener("job.failed", () => void refresh());
+        stream.addEventListener("job.cancelled", () => void refresh());
+        return stream;
+      });
+    return () => streams.forEach((stream) => stream.close());
+  }, [jobs, refresh]);
+
+  const cancel = async (job: Job) => {
+    try {
+      jobSchema.parse(
+        await mutateJson(
+          `/api/v1/jobs/${job.id}/cancel`,
+          "POST",
+          { expectedVersion: job.version },
+          props.getCsrfToken,
+        ),
+      );
+      await refresh();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Job cancellation failed",
+      );
+    }
+  };
+
+  const loadHistory = async (job: Job) => {
+    try {
+      const result = jobEventHistoryResponseSchema.parse(
+        await getJson(`/api/v1/jobs/${job.id}/event-history?limit=20`),
+      );
+      setHistory((current) => ({
+        ...current,
+        [job.id]: result.events.map(
+          (event) => `${event.sequence}. ${event.type}`,
+        ),
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Job history failed");
+    }
+  };
+
+  return (
+    <Surface className="job-activity" aria-labelledby="job-activity-title">
+      <div className="card-heading">
+        <div>
+          <p className="eyebrow">Durable activity</p>
+          <h2 id="job-activity-title">Recent jobs</h2>
+        </div>
+        <button className="secondary-action" onClick={() => void refresh()}>
+          Refresh
+        </button>
+      </div>
+      {error !== null && (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      )}
+      {jobs === null && error === null && <p>Loading durable Job state…</p>}
+      {jobs?.length === 0 && <p>No jobs admitted yet.</p>}
+      <div className="job-list">
+        {jobs?.map((job) => (
+          <article className="job-row" key={job.id}>
+            <div>
+              <strong>{job.type.replaceAll("_", " ")}</strong>
+              <span>
+                {job.status} · attempt {job.attemptCount}
+              </span>
+              <small>{job.currentStepKey ?? "No active step"}</small>
+            </div>
+            <div
+              className="job-progress"
+              aria-label={`${job.progressBasisPoints / 100}% complete`}
+            >
+              <span style={{ width: `${job.progressBasisPoints / 100}%` }} />
+            </div>
+            <b>{(job.progressBasisPoints / 100).toFixed(0)}%</b>
+            <button
+              className="secondary-action"
+              onClick={() => void loadHistory(job)}
+            >
+              History
+            </button>
+            {[
+              "queued",
+              "running",
+              "waiting_provider",
+              "retry_scheduled",
+            ].includes(job.status) && (
+              <button
+                className="danger-action"
+                onClick={() => void cancel(job)}
+              >
+                Cancel
+              </button>
+            )}
+            {history[job.id] !== undefined && (
+              <ol className="job-history">
+                {history[job.id]?.map((event) => (
+                  <li key={event}>{event}</li>
+                ))}
+              </ol>
+            )}
+          </article>
+        ))}
+      </div>
+    </Surface>
   );
 }
 
@@ -732,14 +881,16 @@ function AssetWorkspace(props: {
         );
         setProgress(Math.round((offset / file.size) * 100));
       }
-      const completed = assetSchema.parse(
-        await mutateJson(
-          `/api/v1/uploads/${uploadId}/complete`,
-          "POST",
-          {},
-          props.getCsrfToken,
-        ),
-      );
+      const completed = assetSchema
+        .extend({ job: jobSchema.optional() })
+        .parse(
+          await mutateJson(
+            `/api/v1/uploads/${uploadId}/complete`,
+            "POST",
+            {},
+            props.getCsrfToken,
+          ),
+        );
       assetId ??= completed.id;
       localStorage.removeItem(resumeKey);
       setProgress(100);

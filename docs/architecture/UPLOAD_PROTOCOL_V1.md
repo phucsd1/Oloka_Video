@@ -1,6 +1,6 @@
 # Upload Protocol V1
 
-Status: Slice 3D implementation in review; production cutover pending.
+Status: Slice 3D implemented, merged, and production cutover complete; Phase 3E adds canonical quota reservations and durable Asset-ingestion Jobs.
 
 ## Decision
 

@@ -140,9 +140,10 @@ describe("Asset HTTP routes", () => {
         payload: {},
       });
       expect(completed.statusCode, completed.body).toBe(200);
+      await fixture.service.processIngestion(assetId);
       expect(completed.json()).toMatchObject({
         id: assetId,
-        ingestionStatus: "ready",
+        ingestionStatus: "processing",
       });
 
       const capabilityResponse = await fixture.app.inject({
@@ -257,6 +258,7 @@ describe("Asset HTTP routes", () => {
           "log-redaction-complete",
         )
       ).asset;
+      await fixture.service.processIngestion(ready.id);
       const issued = fixture.service.issueCapability(
         fixture.actor,
         ready.id,

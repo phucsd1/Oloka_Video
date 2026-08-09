@@ -1,6 +1,6 @@
 # Asset Lifecycle
 
-Status: Slice 3D implementation in review; production cutover pending.
+Status: Slice 3D implemented, merged, and production cutover complete. Feature merge `c04576b5d905c2ef55997c53a90ed84e06512564`; forward correction `ce6f51845013c41c1906080354e631c026862cfd`; production schema v5 and normal HF-restart private Asset durability verified.
 
 ## Independent state axes
 

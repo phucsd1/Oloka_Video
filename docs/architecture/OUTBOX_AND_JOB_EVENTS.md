@@ -1,5 +1,7 @@
 # Outbox and Job Events
 
+Status: Phase 3E reuses the v2 outbox and adds append-only, strictly sequenced Job events in migration v6; production cutover is pending.
+
 ## Outbox contract
 
 Every durable mutation that requires later work creates an `outbox_events` row in the same SQLite transaction. Topics cover dispatcher wakeups, domain-event/audit side effects, provider submission intent, cleanup, reconciliation, and SSE-visible event production where not directly inserted.

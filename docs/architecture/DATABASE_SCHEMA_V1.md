@@ -1,6 +1,6 @@
 # Database Schema V1
 
-Status: logical schema blueprint. Project migration v4 is in production. Private Asset migration v5 is implementation in review; its production cutover remains pending.
+Status: logical schema blueprint. Project migration v4 and Private Asset migration v5 are implemented, merged, and in production. Quota policy/reservation tables first legally appear in migration v6; v4 creates only the canonical Project.
 
 ## Conventions
 

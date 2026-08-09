@@ -91,7 +91,8 @@ describe("Asset three-boot recovery", () => {
       {},
       "recovery-complete",
     );
-    expect(completed.asset.ingestionStatus).toBe("ready");
+    expect(completed.asset.ingestionStatus).toBe("processing");
+    await service.processIngestion(completed.asset.id);
     database.checkpoint();
     await database.close();
     await storage.close();

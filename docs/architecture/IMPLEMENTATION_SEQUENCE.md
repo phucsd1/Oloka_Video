@@ -1,6 +1,6 @@
 # Phase 3 Implementation Sequence
 
-Status: Slice 3A.1, Slice 3B, and Slice 3C production cutovers are closed. Slice 3D is implementation in review with production cutover pending. Later slices require explicit authorization.
+Status: Slice 3A.1, Slice 3B, Slice 3C, and Slice 3D production cutovers are closed. Phase 3E is the current local implementation slice; later provider/render slices require explicit authorization.
 
 ## 3A — Persistence kernel
 
@@ -55,7 +55,7 @@ Production evidence: merge SHA
 Project lifecycle verified across one normal Hugging Face Space restart.
 
 - Modules/files: Project contracts/repository/service/routes, Project list/trash queries, owner authorization, 30-day restore policy, and minimal owner UI.
-- Schema/migration: v4 projects with ownership/lifecycle/list/retention indexes; quota policy/reservation implementation remains deferred until explicitly authorized.
+- Schema/migration: v4 creates only canonical Projects with ownership/lifecycle/list/retention indexes; quota policy/reservation implementation first appears in the explicitly authorized v6 migration.
 - Test gate: create/list/read/rename/favorite, version/idempotency races, soft delete/trash/30-day restore, purge-lease conflict/tombstone-ready state, cross-user isolation, restart persistence and indexed query plans.
 - Deployment smoke: active member performs full Project lifecycle across restart; pending/other member cannot access; no bytes are deleted in request.
 - Rollback: stop Project mutations, preserve rows, deploy compatible reader or forward fix; restore only before accepted v4 writes or with explicit data-loss approval.
@@ -64,9 +64,10 @@ Project lifecycle verified across one normal Hugging Face Space restart.
 
 ## 3D — Private Assets
 
-Implementation status: in review on `codex/phase3d-private-assets`; production
-cutover pending. No production migration or media upload is authorized by this
-status.
+Implementation status: complete, merged, and production cutover closed. Feature
+merge `c04576b5d905c2ef55997c53a90ed84e06512564`; forward correction
+`ce6f51845013c41c1906080354e631c026862cfd`; production schema v5 and normal
+restart private Asset durability were verified before Phase 3E.
 
 - Modules/files: filesystem object adapter, Asset/UploadSession repositories/services/routes, raw chunk streaming, ingestion adapter/job admission shim, basic metadata/search, Range/capability delivery, cleanup/reconciliation.
 - Schema/migration: v5 assets, upload sessions, delivery capabilities and containment/search/expiry indexes.
@@ -83,13 +84,15 @@ status.
 
 ## 3E — Durable Job kernel
 
+Implementation status: implemented on `codex/phase3e-durable-job-kernel` and in review. Production cutover, migration v6 production execution, and deployment smoke remain pending.
+
 - Modules/files: Job/JobStep/Event repositories, dispatcher pools, lease/heartbeat/reconciler, quota admission, outbox consumers, cancellation/retry, SSE/history/polling and operations metrics.
 - Schema/migration: v6 generic jobs, steps, events, explicit current-step and
   timeout/heartbeat fields, exact root/child partial unique indexes, provider
   submission-intent fields, and remaining quota/outbox indexes; no composition
   FK or render-only lineage yet.
 - Test gate: exact state machines, two-claimant/version races, expired leases, process death at every boundary, parent/item identity, idempotency conflict, outbox at-least-once, SSE Last-Event-ID replay, cancellation/retry and real progress.
-- Deployment smoke: accepted synthetic non-provider Job survives restart, is reconciled, replays SSE, rejects stale worker results, and exposes queue/lease metrics.
+- Deployment smoke (pending cutover authorization): accepted synthetic non-provider Job survives restart, is reconciled, replays SSE, rejects stale worker results, and exposes queue/lease metrics.
 - Rollback: stop new claims, let leases expire, deploy compatible worker or forward fix; admitted Jobs/events are never deleted or inferred from logs/files.
 - Explicitly excluded: actual LLM/TTS/transcription/Modal calls, composition, preview, render outputs.
 - Exit criteria: provider-independent AC-JOB, AC-QUOTA, AC-OBS and restart/recovery gates pass.

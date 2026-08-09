@@ -282,6 +282,235 @@ export const deliveryCapabilityResponseSchema = z
   })
   .strict();
 
+export const jobTypeSchema = z.enum([
+  "generation",
+  "render",
+  "asset_ingestion",
+  "project_purge",
+  "asset_purge",
+  "output_purge",
+  "upload_cleanup",
+]);
+export const jobStatusSchema = z.enum([
+  "queued",
+  "running",
+  "waiting_provider",
+  "retry_scheduled",
+  "cancel_requested",
+  "cancelled",
+  "completed",
+  "failed",
+]);
+export const jobStepStatusSchema = z.enum([
+  "pending",
+  "running",
+  "waiting_provider",
+  "retry_scheduled",
+  "completed",
+  "skipped",
+  "cancelled",
+  "failed",
+]);
+
+const basisPointsSchema = z.number().int().min(0).max(10000);
+const safeFailureCodeSchema = z.string().max(100).nullable();
+const jobTimestampSchema = utcTimestampSchema;
+
+export const jobSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    id: z.uuid(),
+    projectId: z.uuid().nullable(),
+    type: jobTypeSchema,
+    status: jobStatusSchema,
+    progressBasisPoints: basisPointsSchema,
+    currentStepKey: z.string().max(120).nullable(),
+    attemptCount: z.number().int().nonnegative(),
+    failureCode: safeFailureCodeSchema,
+    createdAt: jobTimestampSchema,
+    startedAt: jobTimestampSchema.nullable(),
+    finishedAt: jobTimestampSchema.nullable(),
+    updatedAt: jobTimestampSchema,
+    version: z.number().int().positive(),
+  })
+  .strict();
+export const jobSummarySchema = jobSchema;
+
+export const jobStepSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    id: z.uuid(),
+    jobId: z.uuid(),
+    parentStepId: z.uuid().nullable(),
+    stepKey: z.string().min(1).max(120),
+    itemKey: z.string().max(255),
+    status: jobStepStatusSchema,
+    attemptCount: z.number().int().nonnegative(),
+    failureCode: safeFailureCodeSchema,
+    startedAt: jobTimestampSchema.nullable(),
+    completedAt: jobTimestampSchema.nullable(),
+    updatedAt: jobTimestampSchema,
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+export const publicJobEventPayloadSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    jobId: z.uuid(),
+    stepId: z.uuid().optional(),
+    status: z.union([jobStatusSchema, jobStepStatusSchema]).optional(),
+    attempt: z.number().int().nonnegative().optional(),
+    progressBasisPoints: basisPointsSchema.optional(),
+    failureCode: z.string().max(100).nullable().optional(),
+    retryAt: jobTimestampSchema.optional(),
+    assetId: z.uuid().optional(),
+  })
+  .strict();
+export const jobEventSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    id: z.uuid(),
+    jobId: z.uuid(),
+    sequence: z.number().int().positive(),
+    type: z.string().min(1).max(120),
+    payload: publicJobEventPayloadSchema,
+    createdAt: jobTimestampSchema,
+  })
+  .strict();
+
+export const jobRequestSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    assetId: z.uuid().optional(),
+  })
+  .strict();
+export const jobResultSchema = z
+  .object({ schemaVersion: z.literal(1), assetId: z.uuid().optional() })
+  .strict();
+export const jobStepInputSchema = jobRequestSchema;
+export const jobStepResultSchema = jobResultSchema;
+
+export const jobListQuerySchema = z
+  .object({
+    type: jobTypeSchema.optional(),
+    status: jobStatusSchema.optional(),
+    projectId: z.uuid().optional(),
+    cursor: opaqueCursorSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(25),
+  })
+  .strict();
+export const jobListResponseSchema = z
+  .object({
+    jobs: z.array(jobSummarySchema).max(100),
+    nextCursor: opaqueCursorSchema.nullable(),
+  })
+  .strict();
+export const jobHistoryQuerySchema = z
+  .object({
+    cursor: opaqueCursorSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(100),
+  })
+  .strict();
+export const jobStepListResponseSchema = z
+  .object({
+    steps: z.array(jobStepSchema).max(100),
+    nextCursor: opaqueCursorSchema.nullable(),
+  })
+  .strict();
+export const jobEventHistoryResponseSchema = z
+  .object({
+    events: z.array(jobEventSchema).max(100),
+    nextCursor: opaqueCursorSchema.nullable(),
+  })
+  .strict();
+export const cancelJobRequestSchema = z
+  .object({ expectedVersion: z.number().int().positive() })
+  .strict();
+export const retryJobRequestSchema = z
+  .object({ expectedVersion: z.number().int().positive() })
+  .strict();
+export const reconcileJobRequestSchema = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    reason: z.string().trim().min(3).max(500),
+  })
+  .strict();
+
+const quotaLimitSchema = z
+  .object({
+    maxVideoDurationSeconds: z.number().int().positive().optional(),
+    maxResolution: z
+      .object({
+        longEdge: z.number().int().positive(),
+        shortEdge: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
+    maxActiveGenerationPerUser: z.number().int().nonnegative().optional(),
+    maxActiveRenderPerUser: z.number().int().nonnegative().optional(),
+    maxQueuedJobsPerUser: z.number().int().nonnegative().optional(),
+    maxActiveRenderSystemDev: z.number().int().nonnegative().optional(),
+    maxAssetSizeBytes: z.number().int().positive().optional(),
+    maxProjectStorageBytes: z.number().int().positive().optional(),
+    maxRetainedOutputsPerProject: z.number().int().positive().optional(),
+  })
+  .strict();
+export const quotaPolicySchema = z
+  .object({ schemaVersion: z.literal(1), limits: quotaLimitSchema })
+  .strict();
+export const quotaPolicyV1Schema = quotaPolicySchema;
+export const quotaPolicyRecordSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    id: z.uuid(),
+    scopeType: z.enum(["system", "user"]),
+    scopeId: z.uuid().nullable(),
+    policy: quotaPolicySchema,
+    effectiveFrom: jobTimestampSchema,
+    effectiveUntil: jobTimestampSchema.nullable(),
+    createdAt: jobTimestampSchema,
+    version: z.number().int().positive(),
+  })
+  .strict();
+export const quotaPolicyListResponseSchema = z
+  .object({
+    policies: z.array(quotaPolicyRecordSchema).max(100),
+    nextCursor: opaqueCursorSchema.nullable(),
+  })
+  .strict();
+export const createQuotaPolicyRequestSchema = z
+  .object({
+    scopeType: z.enum(["system", "user"]),
+    scopeId: z.uuid().nullable().optional(),
+    policy: quotaPolicySchema,
+    effectiveFrom: jobTimestampSchema,
+    effectiveUntil: jobTimestampSchema.nullable().optional(),
+  })
+  .strict();
+export const adminJobSummarySchema = jobSchema;
+export const adminJobDiagnosticsSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    job: jobSchema,
+    steps: z.array(jobStepSchema).max(100),
+  })
+  .strict();
+export const operationsSnapshotSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    queuedJobs: z.number().int().nonnegative(),
+    oldestQueueAgeMs: z.number().int().nonnegative(),
+    activeLeases: z.number().int().nonnegative(),
+    expiredLeases: z.number().int().nonnegative(),
+    retryScheduled: z.number().int().nonnegative(),
+    cancelRequested: z.number().int().nonnegative(),
+    outboxPending: z.number().int().nonnegative(),
+    outboxDead: z.number().int().nonnegative(),
+    dispatcherCapacity: z.number().int().positive(),
+  })
+  .strict();
+
 export const adminUsersQuerySchema = z
   .object({
     status: userStatusSchema.optional(),
@@ -400,6 +629,36 @@ export type DeliveryCapabilityRequest = z.infer<
 export type DeliveryCapabilityResponse = z.infer<
   typeof deliveryCapabilityResponseSchema
 >;
+export type Job = z.infer<typeof jobSchema>;
+export type JobSummary = z.infer<typeof jobSummarySchema>;
+export type JobStep = z.infer<typeof jobStepSchema>;
+export type JobEvent = z.infer<typeof jobEventSchema>;
+export type PublicJobEventPayload = z.infer<typeof publicJobEventPayloadSchema>;
+export type JobRequest = z.infer<typeof jobRequestSchema>;
+export type JobResult = z.infer<typeof jobResultSchema>;
+export type JobStepInput = z.infer<typeof jobStepInputSchema>;
+export type JobStepResult = z.infer<typeof jobStepResultSchema>;
+export type JobListQuery = z.infer<typeof jobListQuerySchema>;
+export type JobListResponse = z.infer<typeof jobListResponseSchema>;
+export type JobHistoryQuery = z.infer<typeof jobHistoryQuerySchema>;
+export type JobStepListResponse = z.infer<typeof jobStepListResponseSchema>;
+export type JobEventHistoryResponse = z.infer<
+  typeof jobEventHistoryResponseSchema
+>;
+export type CancelJobRequest = z.infer<typeof cancelJobRequestSchema>;
+export type RetryJobRequest = z.infer<typeof retryJobRequestSchema>;
+export type ReconcileJobRequest = z.infer<typeof reconcileJobRequestSchema>;
+export type QuotaPolicyV1 = z.infer<typeof quotaPolicyV1Schema>;
+export type QuotaPolicyRecord = z.infer<typeof quotaPolicyRecordSchema>;
+export type QuotaPolicyListResponse = z.infer<
+  typeof quotaPolicyListResponseSchema
+>;
+export type CreateQuotaPolicyRequest = z.infer<
+  typeof createQuotaPolicyRequestSchema
+>;
+export type AdminJobSummary = z.infer<typeof adminJobSummarySchema>;
+export type AdminJobDiagnostics = z.infer<typeof adminJobDiagnosticsSchema>;
+export type OperationsSnapshot = z.infer<typeof operationsSnapshotSchema>;
 export type PublicErrorCode = z.infer<typeof publicErrorCodeSchema>;
 export type AdminUserTransitionRequest = z.infer<
   typeof adminUserTransitionRequestSchema
