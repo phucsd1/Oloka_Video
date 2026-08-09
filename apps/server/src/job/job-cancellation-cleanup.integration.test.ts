@@ -42,7 +42,7 @@ describe("Job cancellation cleanup", () => {
       (leaseOwner) =>
         new Worker(new URL("./job-cancel-race.worker.ts", import.meta.url), {
           workerData: { databasePath, barrier, leaseOwner },
-          execArgv: ["--import", "tsx"],
+          execArgv: ["--import", "tsx/esm"],
         }),
     );
     const results = workers.map(

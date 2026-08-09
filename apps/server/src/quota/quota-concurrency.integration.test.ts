@@ -64,7 +64,7 @@ describe("quota admission concurrency", () => {
             stepId,
             assetId,
           },
-          execArgv: ["--import", "tsx"],
+          execArgv: ["--import", "tsx/esm"],
         }),
     );
     const results = workers.map(
