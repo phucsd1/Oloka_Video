@@ -16,6 +16,8 @@ import { FilesystemObjectStorage } from "../storage/filesystem-object-storage.js
 import { AssetService } from "./asset-service.js";
 import { AssetMaintenanceService } from "./asset-maintenance-service.js";
 import { BaselineQuotaPolicyResolver } from "../quota/quota-policy.js";
+import { IdempotencyRepository } from "../database/repositories/idempotency-repository.js";
+import { sha256CanonicalJson } from "../kernel/canonical-json.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -101,6 +103,258 @@ describe("Asset service", () => {
           "quota-project-key-3",
         ),
       ).resolves.toMatchObject({ upload: { status: "open" } });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("replays completed upload initialization when new staging is unavailable", async () => {
+    const fixture = await createFixture();
+    try {
+      const request = {
+        originalFilename: "zero-stage-replay.png",
+        kind: "image" as const,
+        declaredSize: 12,
+      };
+      const first = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        request,
+        "zero-stage-replay-key",
+      );
+      const stagesAfterFirst = fixture.getStageCallCount();
+      fixture.setStageFailure(true);
+      const replay = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        request,
+        "zero-stage-replay-key",
+      );
+
+      expect(replay).toMatchObject({
+        replayed: true,
+        asset: { id: first.asset.id },
+        upload: { uploadId: first.upload.uploadId },
+      });
+      expect(fixture.getStageCallCount()).toBe(stagesAfterFirst);
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("fails completed initialization replay when canonical staging is missing", async () => {
+    const fixture = await createFixture();
+    try {
+      const request = {
+        originalFilename: "missing-replay-stage.png",
+        kind: "image" as const,
+        declaredSize: 12,
+      };
+      const first = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        request,
+        "missing-replay-stage-key",
+      );
+      await fixture.storage.delete("staging", first.upload.uploadId);
+      const stagesAfterFirst = fixture.getStageCallCount();
+
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          request,
+          "missing-replay-stage-key",
+        ),
+      ).rejects.toMatchObject({
+        code: "STORAGE_UNAVAILABLE",
+        message: "upload_initialize_replay_staging_missing",
+      });
+      expect(fixture.getStageCallCount()).toBe(stagesAfterFirst);
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("rejects upload initialization semantic conflicts without staging", async () => {
+    const fixture = await createFixture();
+    try {
+      await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "conflict-original.png",
+          kind: "image",
+          declaredSize: 12,
+        },
+        "initialize-conflict-key",
+      );
+      const stagesAfterFirst = fixture.getStageCallCount();
+
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          {
+            originalFilename: "conflict-changed.png",
+            kind: "image",
+            declaredSize: 12,
+          },
+          "initialize-conflict-key",
+        ),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      expect(fixture.getStageCallCount()).toBe(stagesAfterFirst);
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("rejects in-progress upload initialization without staging", async () => {
+    const fixture = await createFixture();
+    try {
+      const request = {
+        originalFilename: "initialize-in-progress.png",
+        kind: "image" as const,
+        declaredSize: 12,
+      };
+      fixture.database.transactions.run("immediate", (context) => {
+        new IdempotencyRepository({
+          generate: () => "00000000-0000-4000-8000-999999999999",
+        }).begin(context, {
+          userId: fixture.actor.user.id,
+          operation: `asset.upload.initialize:${fixture.projectId}`,
+          idempotencyKey: "initialize-in-progress-key",
+          semanticRequestHashSha256: sha256CanonicalJson({
+            projectId: fixture.projectId,
+            ...request,
+          }),
+          createdAt: 1_700_000_000_000,
+          expiresAt: 1_700_086_400_000,
+        });
+      });
+
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          request,
+          "initialize-in-progress-key",
+        ),
+      ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+      expect(fixture.getStageCallCount()).toBe(0);
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("retries a retryable upload initialization with fresh canonical staging", async () => {
+    const fixture = await createFixture();
+    try {
+      const request = {
+        originalFilename: "initialize-retryable.png",
+        kind: "image" as const,
+        declaredSize: 12,
+      };
+      fixture.database.transactions.run("immediate", (context) => {
+        const repository = new IdempotencyRepository({
+          generate: () => "00000000-0000-4000-8000-999999999998",
+        });
+        const begin = repository.begin(context, {
+          userId: fixture.actor.user.id,
+          operation: `asset.upload.initialize:${fixture.projectId}`,
+          idempotencyKey: "initialize-retryable-key",
+          semanticRequestHashSha256: sha256CanonicalJson({
+            projectId: fixture.projectId,
+            ...request,
+          }),
+          createdAt: 1_700_000_000_000,
+          expiresAt: 1_700_086_400_000,
+        });
+        if (begin.kind !== "started") throw new Error("retryable seed failed");
+        repository.markRetryableFailure(context, begin.recordId);
+      });
+
+      await expect(
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          request,
+          "initialize-retryable-key",
+        ),
+      ).resolves.toMatchObject({ replayed: false, upload: { status: "open" } });
+      expect(fixture.getStageCallCount()).toBe(1);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              `SELECT
+                 (SELECT COUNT(*) FROM assets) AS assets,
+                 (SELECT COUNT(*) FROM upload_sessions) AS uploads,
+                 (SELECT COUNT(*) FROM audit_events WHERE action = 'upload.create') AS audits,
+                 (SELECT COUNT(*) FROM idempotency_records WHERE status = 'completed') AS completed`,
+            )
+            .get(),
+        ),
+      ).toEqual({ assets: 1, uploads: 1, audits: 1, completed: 2 });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("keeps one canonical upload and cleans losing staging in a same-key race", async () => {
+    const fixture = await createFixture();
+    try {
+      const request = {
+        originalFilename: "initialize-race.png",
+        kind: "image" as const,
+        declaredSize: 12,
+      };
+      const results = await Promise.all([
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          request,
+          "initialize-race-key",
+        ),
+        fixture.service.initializeUpload(
+          fixture.actor,
+          fixture.projectId,
+          request,
+          "initialize-race-key",
+        ),
+      ]);
+
+      expect(new Set(results.map((result) => result.asset.id)).size).toBe(1);
+      expect(
+        new Set(results.map((result) => result.upload.uploadId)).size,
+      ).toBe(1);
+      expect(results.map((result) => result.replayed).sort()).toEqual([
+        false,
+        true,
+      ]);
+      expect(fixture.getStageCallCount()).toBe(2);
+      expect(await fixture.storage.listForReconciliation()).toMatchObject({
+        staging: [results[0].upload.uploadId],
+      });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              `SELECT
+                 (SELECT COUNT(*) FROM assets) AS assets,
+                 (SELECT COUNT(*) FROM upload_sessions) AS uploads,
+                 (SELECT COUNT(*) FROM audit_events WHERE action = 'upload.create') AS audits,
+                 (SELECT COUNT(*) FROM idempotency_records WHERE operation LIKE 'asset.upload.initialize:%') AS records`,
+            )
+            .get(),
+        ),
+      ).toEqual({ assets: 1, uploads: 1, audits: 1, records: 1 });
     } finally {
       await fixture.database.close();
       await fixture.storage.close();
@@ -523,6 +777,15 @@ describe("Asset service", () => {
             .get(),
         ),
       ).toEqual({ count: 1 });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'capability.issue'",
+            )
+            .get(),
+        ),
+      ).toEqual({ count: 1 });
       expect(() =>
         fixture.service.issueCapability(
           fixture.actor,
@@ -533,6 +796,154 @@ describe("Asset service", () => {
       ).toThrowError(
         expect.objectContaining({
           code: "IDEMPOTENCY_CONFLICT",
+        }) as unknown as Error,
+      );
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("does not persist raw delivery capabilities in SQLite", async () => {
+    const fixture = await createFixture();
+    try {
+      const ready = await createReadyAsset(
+        fixture,
+        "capability-database-redaction",
+      );
+      const issued = fixture.service.issueCapability(
+        fixture.actor,
+        ready.id,
+        "preview",
+        "capability-database-redaction-key",
+      );
+      const evidence = fixture.database.transactions.run(
+        "read",
+        ({ database }) => {
+          const tables = database
+            .prepare(
+              "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .all() as { name: string }[];
+          return JSON.stringify(
+            Object.fromEntries(
+              tables.map(({ name }) => [
+                name,
+                database.prepare(`SELECT * FROM "${name}" LIMIT 1000`).all(),
+              ]),
+            ),
+            (_key, value: unknown) =>
+              value instanceof Uint8Array
+                ? Buffer.from(value).toString("hex")
+                : value,
+          );
+        },
+      );
+
+      expect(
+        evidence.includes(issued.capability),
+        "raw delivery capability must be absent from persisted database evidence",
+      ).toBe(false);
+      const persistedReplay = fixture.database.transactions.run(
+        "read",
+        ({ database }) =>
+          JSON.parse(
+            (
+              database
+                .prepare(
+                  "SELECT response_json FROM idempotency_records WHERE operation LIKE 'asset.capability.issue:%'",
+                )
+                .get() as { response_json: string }
+            ).response_json,
+          ) as Record<string, unknown>,
+      );
+      expect(persistedReplay).toEqual({
+        capabilityId: expect.any(String),
+        assetId: ready.id,
+        operation: "preview",
+        expiresAt: issued.expiresAt,
+      });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("does not resurrect an expired capability during idempotency replay", async () => {
+    const fixture = await createFixture();
+    try {
+      const ready = await createReadyAsset(fixture, "capability-expiry-replay");
+      const first = fixture.service.issueCapability(
+        fixture.actor,
+        ready.id,
+        "preview",
+        "capability-expiry-replay-key",
+      );
+      fixture.setNow(Date.parse(first.expiresAt) + 1);
+
+      expect(() =>
+        fixture.service.issueCapability(
+          fixture.actor,
+          ready.id,
+          "preview",
+          "capability-expiry-replay-key",
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "RESOURCE_STATE_CONFLICT",
+          message: "capability_replay_not_active",
+        }) as unknown as Error,
+      );
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count, MAX(expires_at) AS expiresAt FROM delivery_capabilities",
+            )
+            .get(),
+        ),
+      ).toEqual({ count: 1, expiresAt: Date.parse(first.expiresAt) });
+    } finally {
+      await fixture.database.close();
+      await fixture.storage.close();
+    }
+  });
+
+  it("invalidates capability delivery and replay when the issuing user is disabled", async () => {
+    const fixture = await createFixture();
+    try {
+      const ready = await createReadyAsset(fixture, "capability-disabled-user");
+      const issued = fixture.service.issueCapability(
+        fixture.actor,
+        ready.id,
+        "stream",
+        "capability-disabled-user-key",
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE users SET status = 'disabled', disabled_at = ? WHERE id = ?",
+          )
+          .run(1_700_000_100_000, fixture.actor.user.id);
+      });
+
+      expect(
+        fixture.service.authorizeCapabilityDelivery(
+          ready.id,
+          issued.capability,
+          "stream",
+        ),
+      ).toBeNull();
+      expect(() =>
+        fixture.service.issueCapability(
+          fixture.actor,
+          ready.id,
+          "stream",
+          "capability-disabled-user-key",
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "RESOURCE_STATE_CONFLICT",
         }) as unknown as Error,
       );
     } finally {
@@ -1023,6 +1434,7 @@ async function createFixture(
   ).project.id;
   const storage = new FilesystemObjectStorage(join(directory, "objects-root"));
   let shouldFailStage = stageFailure;
+  let stageCallCount = 0;
   let shouldFailCreateStagingHash = false;
   let shouldFailFinalizeCommit = false;
   let failNextImmediate = false;
@@ -1040,8 +1452,13 @@ async function createFixture(
   };
   const serviceStorage = new Proxy(storage, {
     get(target, property, receiver) {
-      if (property === "stage" && shouldFailStage)
-        return () => Promise.reject(new Error("injected stage failure"));
+      if (property === "stage")
+        return (stagingKey: string) => {
+          stageCallCount += 1;
+          return shouldFailStage
+            ? Promise.reject(new Error("injected stage failure"))
+            : target.stage(stagingKey);
+        };
       if (property === "createStagingHash" && shouldFailCreateStagingHash)
         return () => Promise.reject(new Error("injected staging hash failure"));
       if (property === "finalize" && shouldFailFinalizeCommit)
@@ -1083,6 +1500,7 @@ async function createFixture(
     setStageFailure: (value: boolean) => {
       shouldFailStage = value;
     },
+    getStageCallCount: () => stageCallCount,
     setCreateStagingHashFailure: (value: boolean) => {
       shouldFailCreateStagingHash = value;
     },

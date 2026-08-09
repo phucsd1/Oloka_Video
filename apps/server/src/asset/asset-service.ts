@@ -10,14 +10,12 @@ import {
   type UploadSession,
   uploadSessionSchema,
 } from "@oloka/contracts";
-import {
-  createHash,
-  createHmac,
-  randomBytes,
-  timingSafeEqual,
-} from "node:crypto";
+import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import type { ObjectStorage } from "../storage/object-storage.js";
-import type { TransactionRunner } from "../database/database.js";
+import type {
+  TransactionContext,
+  TransactionRunner,
+} from "../database/database.js";
 import {
   AssetRepository,
   type AssetRow,
@@ -40,6 +38,7 @@ export const MAX_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 const ASSET_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const CAPABILITY_TTL_MS = 5 * 60 * 1000;
+const CAPABILITY_TOKEN_CONTEXT = "oloka/delivery-capability-token/v1";
 
 export interface AssetServiceOptions {
   transactions: TransactionRunner;
@@ -61,11 +60,21 @@ export class AssetService {
   private readonly idempotency: IdempotencyRepository;
   private readonly audit: AuditEventRepository;
   private readonly outbox: OutboxRepository;
+  private readonly capabilityTokenKey: Buffer;
 
   constructor(private readonly options: AssetServiceOptions) {
     this.idempotency = new IdempotencyRepository(options.idGenerator);
     this.audit = new AuditEventRepository(options.idGenerator);
     this.outbox = new OutboxRepository(options.idGenerator);
+    this.capabilityTokenKey = Buffer.from(
+      hkdfSync(
+        "sha256",
+        options.applicationKey,
+        Buffer.alloc(0),
+        CAPABILITY_TOKEN_CONTEXT,
+        32,
+      ),
+    );
   }
 
   async initializeUpload(
@@ -76,6 +85,24 @@ export class AssetService {
   ): Promise<{ asset: Asset; upload: UploadSession; replayed: boolean }> {
     const normalized = normalizeFilename(request.originalFilename);
     const now = this.options.clock.now();
+    const idempotencyInput = {
+      userId: actor.user.id,
+      operation: `asset.upload.initialize:${projectId}`,
+      idempotencyKey,
+      semanticRequestHashSha256: sha256CanonicalJson({
+        projectId,
+        ...request,
+        originalFilename: normalized,
+      }),
+    };
+    assertActiveActor(actor);
+    const lookup = this.options.transactions.run("read", (context) =>
+      this.idempotency.lookup(context, idempotencyInput),
+    );
+    if (lookup.kind === "replay")
+      return this.replayInitializedUpload(actor, lookup.response);
+    if (lookup.kind === "conflict" || lookup.kind === "in_progress")
+      throw idempotencyError(lookup.kind);
     const allocatedAssetId = this.options.idGenerator.generate();
     const allocatedUploadId = this.options.idGenerator.generate();
     try {
@@ -88,14 +115,7 @@ export class AssetService {
       result = this.options.transactions.run("immediate", (context) => {
         assertActiveActor(actor);
         const begin = this.idempotency.begin(context, {
-          userId: actor.user.id,
-          operation: `asset.upload.initialize:${projectId}`,
-          idempotencyKey,
-          semanticRequestHashSha256: sha256CanonicalJson({
-            projectId,
-            ...request,
-            originalFilename: normalized,
-          }),
+          ...idempotencyInput,
           createdAt: now,
           expiresAt: now + UPLOAD_TTL_MS,
         });
@@ -226,26 +246,46 @@ export class AssetService {
       await this.options.storage
         .delete("staging", allocatedUploadId)
         .catch(() => undefined);
-      const current = this.headUpload(actor, result.upload.uploadId);
-      if (current.status !== "open") {
-        throw new ApplicationError(
-          "RESOURCE_STATE_CONFLICT",
-          "upload_initialize_replay_not_open",
-        );
-      }
-      await this.options.storage.statStaging(current.uploadId).catch(() => {
-        throw new ApplicationError(
-          "STORAGE_UNAVAILABLE",
-          "upload_initialize_replay_staging_missing",
-        );
+      return this.replayInitializedUpload(actor, {
+        asset: result.asset,
+        upload: result.upload,
       });
-      return {
-        asset: this.getAsset(actor, result.asset.id),
-        upload: current,
-        replayed: true,
-      };
     }
     return { asset: result.asset, upload: result.upload, replayed: false };
+  }
+
+  private async replayInitializedUpload(
+    actor: AuthenticatedSession,
+    persisted: unknown,
+  ): Promise<{ asset: Asset; upload: UploadSession; replayed: true }> {
+    const response = persisted as {
+      asset?: { id?: unknown };
+      upload?: unknown;
+    };
+    const upload = uploadSessionSchema.parse(response.upload);
+    if (typeof response.asset?.id !== "string")
+      throw new ApplicationError(
+        "RESOURCE_STATE_CONFLICT",
+        "upload_initialize_replay_invalid",
+      );
+    const current = this.headUpload(actor, upload.uploadId);
+    if (current.status !== "open") {
+      throw new ApplicationError(
+        "RESOURCE_STATE_CONFLICT",
+        "upload_initialize_replay_not_open",
+      );
+    }
+    await this.options.storage.statStaging(current.uploadId).catch(() => {
+      throw new ApplicationError(
+        "STORAGE_UNAVAILABLE",
+        "upload_initialize_replay_staging_missing",
+      );
+    });
+    return {
+      asset: this.getAsset(actor, response.asset.id),
+      upload: current,
+      replayed: true,
+    };
   }
 
   headUpload(actor: AuthenticatedSession, uploadId: string): UploadSession {
@@ -1149,7 +1189,7 @@ export class AssetService {
         expiresAt: now + UPLOAD_TTL_MS,
       });
       if (begin.kind === "replay")
-        return deliveryCapabilityResponseSchema.parse(begin.response);
+        return this.reconstructCapabilityReplay(context, actor, begin.response);
       if (begin.kind !== "started" && begin.kind !== "retryable")
         throw idempotencyError(begin.kind);
       const asset = this.assets.getOwnedAsset(context, assetId, actor.user.id);
@@ -1162,8 +1202,16 @@ export class AssetService {
           "RESOURCE_NOT_FOUND",
           "asset_not_deliverable",
         );
-      const token = randomBytes(32).toString("base64url");
       const id = this.options.idGenerator.generate();
+      const expiresAt = now + CAPABILITY_TTL_MS;
+      const token = this.deriveCapabilityToken({
+        capabilityId: id,
+        issuedToUserId: actor.user.id,
+        resourceType: "asset",
+        resourceId: assetId,
+        operation,
+        expiresAt,
+      });
       context.database
         .prepare(
           "INSERT INTO delivery_capabilities (id, issued_to_user_id, resource_type, resource_id, operation, token_hash_sha256, status, expires_at, created_at) VALUES (?, ?, 'asset', ?, ?, ?, 'active', ?, ?)",
@@ -1174,7 +1222,7 @@ export class AssetService {
           assetId,
           operation,
           createHash("sha256").update(token).digest(),
-          now + CAPABILITY_TTL_MS,
+          expiresAt,
           now,
         );
       this.audit.append(context, {
@@ -1189,42 +1237,123 @@ export class AssetService {
       });
       const response = deliveryCapabilityResponseSchema.parse({
         capability: token,
-        expiresAt: new Date(now + CAPABILITY_TTL_MS).toISOString(),
+        expiresAt: new Date(expiresAt).toISOString(),
         operation,
         assetId,
       });
       this.idempotency.complete(context, {
         recordId: begin.recordId,
         responseStatus: 200,
-        response,
+        response: {
+          capabilityId: id,
+          assetId,
+          operation,
+          expiresAt: response.expiresAt,
+        },
         resourceId: assetId,
       });
       return response;
     });
   }
 
-  resolveCapability(
-    assetId: string,
-    token: string,
-    operation: "stream" | "preview" | "download",
-  ): Asset | null {
-    return this.options.transactions.run("immediate", (context) => {
-      const row = context.database
-        .prepare(
-          `SELECT a.* FROM delivery_capabilities c JOIN assets a ON a.id = c.resource_id WHERE c.resource_type = 'asset' AND c.resource_id = ? AND c.operation = ? AND c.status = 'active' AND c.expires_at > ? AND c.token_hash_sha256 = ?`,
-        )
-        .get(
-          assetId,
-          operation,
-          this.options.clock.now(),
-          createHash("sha256").update(token).digest(),
-        ) as AssetRow | undefined;
-      return row === undefined ||
-        row.lifecycle_status !== "active" ||
-        row.ingestion_status !== "ready"
-        ? null
-        : this.toAsset(row);
+  private reconstructCapabilityReplay(
+    context: TransactionContext,
+    actor: AuthenticatedSession,
+    persisted: unknown,
+  ): DeliveryCapabilityResponse {
+    const replay = parseCapabilityReplayState(persisted);
+    const row = context.database
+      .prepare(
+        `SELECT c.id, c.issued_to_user_id, c.resource_type, c.resource_id, c.operation,
+                c.token_hash_sha256, c.status, c.expires_at, a.lifecycle_status,
+                a.ingestion_status, u.status AS user_status
+         FROM delivery_capabilities c
+         JOIN assets a ON a.id = c.resource_id
+         JOIN users u ON u.id = c.issued_to_user_id
+         WHERE c.id = ?`,
+      )
+      .get(replay.capabilityId) as
+      | {
+          id: string;
+          issued_to_user_id: string;
+          resource_type: string;
+          resource_id: string;
+          operation: string;
+          token_hash_sha256: Uint8Array;
+          status: string;
+          expires_at: number;
+          lifecycle_status: string;
+          ingestion_status: string;
+          user_status: string;
+        }
+      | undefined;
+    if (
+      row === undefined ||
+      row.issued_to_user_id !== actor.user.id ||
+      row.resource_type !== "asset" ||
+      row.resource_id !== replay.assetId ||
+      row.operation !== replay.operation ||
+      row.status !== "active" ||
+      row.expires_at <= this.options.clock.now() ||
+      row.lifecycle_status !== "active" ||
+      row.ingestion_status !== "ready" ||
+      row.user_status !== "active" ||
+      new Date(row.expires_at).toISOString() !== replay.expiresAt
+    ) {
+      throw new ApplicationError(
+        "RESOURCE_STATE_CONFLICT",
+        "capability_replay_not_active",
+      );
+    }
+    const token = this.deriveCapabilityToken({
+      capabilityId: row.id,
+      issuedToUserId: row.issued_to_user_id,
+      resourceType: "asset",
+      resourceId: row.resource_id,
+      operation: replay.operation,
+      expiresAt: row.expires_at,
     });
+    const tokenHash = createHash("sha256").update(token).digest();
+    const storedHash = Buffer.from(row.token_hash_sha256);
+    if (
+      tokenHash.length !== storedHash.length ||
+      !timingSafeEqual(tokenHash, storedHash)
+    ) {
+      throw new ApplicationError(
+        "RESOURCE_STATE_CONFLICT",
+        "capability_replay_not_active",
+      );
+    }
+    return deliveryCapabilityResponseSchema.parse({
+      capability: token,
+      expiresAt: replay.expiresAt,
+      operation: replay.operation,
+      assetId: replay.assetId,
+    });
+  }
+
+  private deriveCapabilityToken(input: {
+    capabilityId: string;
+    issuedToUserId: string;
+    resourceType: "asset";
+    resourceId: string;
+    operation: "stream" | "preview" | "download";
+    expiresAt: number;
+  }): string {
+    return createHmac("sha256", this.capabilityTokenKey)
+      .update(
+        canonicalizeJson({
+          version: 1,
+          capabilityId: input.capabilityId,
+          issuedToUserId: input.issuedToUserId,
+          resourceType: input.resourceType,
+          resourceId: input.resourceId,
+          operation: input.operation,
+          expiresAt: input.expiresAt,
+        }),
+        "utf8",
+      )
+      .digest("base64url");
   }
 
   private rejectUpload(
@@ -1437,6 +1566,39 @@ function mutationConflict(
     "RESOURCE_STATE_CONFLICT",
     "asset_lifecycle_conflict",
   );
+}
+
+function parseCapabilityReplayState(value: unknown): {
+  capabilityId: string;
+  assetId: string;
+  operation: "stream" | "preview" | "download";
+  expiresAt: string;
+} {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new ApplicationError(
+      "RESOURCE_STATE_CONFLICT",
+      "capability_replay_invalid",
+    );
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.capabilityId !== "string" ||
+    typeof candidate.assetId !== "string" ||
+    (candidate.operation !== "stream" &&
+      candidate.operation !== "preview" &&
+      candidate.operation !== "download") ||
+    typeof candidate.expiresAt !== "string"
+  ) {
+    throw new ApplicationError(
+      "RESOURCE_STATE_CONFLICT",
+      "capability_replay_invalid",
+    );
+  }
+  return {
+    capabilityId: candidate.capabilityId,
+    assetId: candidate.assetId,
+    operation: candidate.operation,
+    expiresAt: candidate.expiresAt,
+  };
 }
 
 function encodeCursor(

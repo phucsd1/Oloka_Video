@@ -18,58 +18,30 @@ export type IdempotencyBeginResult =
   | { kind: "retryable"; recordId: string }
   | { kind: "conflict" };
 
+export type IdempotencyLookupResult =
+  | { kind: "absent" }
+  | Exclude<IdempotencyBeginResult, { kind: "started" }>;
+
+interface IdempotencyIdentity {
+  userId: string;
+  operation: string;
+  idempotencyKey: string;
+  semanticRequestHashSha256: string;
+}
+
 export class IdempotencyRepository {
   constructor(private readonly idGenerator: IdGenerator) {}
 
   begin(
     context: TransactionContext,
-    input: {
-      userId: string;
-      operation: string;
-      idempotencyKey: string;
-      semanticRequestHashSha256: string;
+    input: IdempotencyIdentity & {
       createdAt: number;
       expiresAt: number;
     },
   ): IdempotencyBeginResult {
+    const existing = this.lookup(context, input);
+    if (existing.kind !== "absent") return existing;
     const keyHash = hashKey(input.idempotencyKey);
-    const existing = context.database
-      .prepare(
-        `SELECT id, semantic_request_hash_sha256, status, response_status, response_json, resource_id
-         FROM idempotency_records
-         WHERE user_id = ? AND operation = ? AND idempotency_key_hash_sha256 = ?`,
-      )
-      .get(input.userId, input.operation, keyHash) as
-      | {
-          id: string;
-          semantic_request_hash_sha256: string;
-          status: "in_progress" | "completed" | "failed_retryable";
-          response_status: number | null;
-          response_json: string | null;
-          resource_id: string | null;
-        }
-      | undefined;
-    if (existing !== undefined) {
-      if (
-        existing.semantic_request_hash_sha256 !==
-        input.semanticRequestHashSha256
-      ) {
-        return { kind: "conflict" };
-      }
-      if (existing.status === "completed") {
-        return {
-          kind: "replay",
-          responseStatus: existing.response_status as number,
-          response: JSON.parse(existing.response_json as string) as JsonValue,
-          ...(existing.resource_id === null
-            ? {}
-            : { resourceId: existing.resource_id }),
-        };
-      }
-      return existing.status === "in_progress"
-        ? { kind: "in_progress" }
-        : { kind: "retryable", recordId: existing.id };
-    }
     const recordId = this.idGenerator.generate();
     context.database
       .prepare(
@@ -87,6 +59,48 @@ export class IdempotencyRepository {
         input.expiresAt,
       );
     return { kind: "started", recordId };
+  }
+
+  lookup(
+    context: TransactionContext,
+    input: IdempotencyIdentity,
+  ): IdempotencyLookupResult {
+    const keyHash = hashKey(input.idempotencyKey);
+    const existing = context.database
+      .prepare(
+        `SELECT id, semantic_request_hash_sha256, status, response_status, response_json, resource_id
+         FROM idempotency_records
+         WHERE user_id = ? AND operation = ? AND idempotency_key_hash_sha256 = ?`,
+      )
+      .get(input.userId, input.operation, keyHash) as
+      | {
+          id: string;
+          semantic_request_hash_sha256: string;
+          status: "in_progress" | "completed" | "failed_retryable";
+          response_status: number | null;
+          response_json: string | null;
+          resource_id: string | null;
+        }
+      | undefined;
+    if (existing === undefined) return { kind: "absent" };
+    if (
+      existing.semantic_request_hash_sha256 !== input.semanticRequestHashSha256
+    ) {
+      return { kind: "conflict" };
+    }
+    if (existing.status === "completed") {
+      return {
+        kind: "replay",
+        responseStatus: existing.response_status as number,
+        response: JSON.parse(existing.response_json as string) as JsonValue,
+        ...(existing.resource_id === null
+          ? {}
+          : { resourceId: existing.resource_id }),
+      };
+    }
+    return existing.status === "in_progress"
+      ? { kind: "in_progress" }
+      : { kind: "retryable", recordId: existing.id };
   }
 
   replay(

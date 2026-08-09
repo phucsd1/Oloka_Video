@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import Fastify from "fastify";
+import { Writable } from "node:stream";
+import Fastify, { LogController } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteSystemDatabase } from "../database/sqlite-system-database.js";
 import { registerErrorHandler } from "../http/error-handler.js";
@@ -225,6 +226,60 @@ describe("Asset HTTP routes", () => {
       await fixture.database.close();
     }
   });
+
+  it("keeps capability tokens and query strings out of structured logs", async () => {
+    const fixture = await createFixture();
+    try {
+      const initialized = await fixture.service.initializeUpload(
+        fixture.actor,
+        fixture.projectId,
+        {
+          originalFilename: "log-redaction.png",
+          kind: "image",
+          declaredMime: "image/png",
+          declaredSize: PNG.length,
+          declaredChecksumSha256: checksum(PNG),
+        },
+        "log-redaction-upload",
+      );
+      await fixture.service.appendChunk(
+        fixture.actor,
+        initialized.upload.uploadId,
+        0,
+        PNG,
+        checksum(PNG),
+      );
+      const ready = (
+        await fixture.service.completeUpload(
+          fixture.actor,
+          initialized.upload.uploadId,
+          {},
+          "log-redaction-complete",
+        )
+      ).asset;
+      const issued = fixture.service.issueCapability(
+        fixture.actor,
+        ready.id,
+        "preview",
+        "log-redaction-capability",
+      );
+
+      const response = await fixture.app.inject({
+        method: "GET",
+        url: `/api/v1/assets/${ready.id}/content?capability=${encodeURIComponent(issued.capability)}&operation=preview`,
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      const evidence = fixture.logs.join("");
+      expect(
+        evidence.includes(issued.capability),
+        "structured logs must not contain raw delivery capabilities",
+      ).toBe(false);
+      expect(evidence).not.toContain("?capability=");
+    } finally {
+      await fixture.app.close();
+      await fixture.database.close();
+    }
+  });
 });
 
 const PNG = Buffer.from(
@@ -291,7 +346,17 @@ async function createFixture() {
       token === "csrf-test-token",
     auditCsrfFailure: () => undefined,
   } as unknown as IdentityService;
-  const app = Fastify({ logger: false });
+  const logs: string[] = [];
+  const logStream = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      logs.push(chunk.toString("utf8"));
+      callback();
+    },
+  });
+  const app = Fastify({
+    logController: new LogController({ disableRequestLogging: true }),
+    logger: { level: "info", stream: logStream },
+  });
   registerAssetRoutes({
     app,
     identityService,
@@ -301,5 +366,5 @@ async function createFixture() {
   });
   registerErrorHandler(app);
   app.addHook("onClose", () => storage.close());
-  return { app, database, projectId };
+  return { app, database, projectId, service, actor, logs };
 }
