@@ -143,6 +143,9 @@ describe("App", () => {
       )
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ projects: [], nextCursor: null })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ jobs: [], nextCursor: null })),
       );
 
     render(<App />);
@@ -178,6 +181,10 @@ describe("App", () => {
         return Promise.resolve(
           new Response(JSON.stringify({ users: [], nextCursor: null })),
         );
+      if (url.startsWith("/api/v1/jobs"))
+        return Promise.resolve(
+          new Response(JSON.stringify({ jobs: [], nextCursor: null })),
+        );
       return Promise.resolve(
         new Response(JSON.stringify({ projects: [], nextCursor: null })),
       );
@@ -187,6 +194,65 @@ describe("App", () => {
 
     expect(await screen.findByText("Pending users")).toBeInTheDocument();
     expect(await screen.findByText("No pending users.")).toBeInTheDocument();
+  });
+
+  it("renders persisted Job progress without a timer-generated value", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url === "/api/v1/auth/session")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              authenticated: true,
+              user: {
+                id: "00000000-0000-4000-8000-000000000001",
+                email: "member@example.test",
+                displayName: "Active Member",
+                avatarUrl: null,
+                role: "member",
+                status: "active",
+                version: 1,
+              },
+            }),
+          ),
+        );
+      if (url.startsWith("/api/v1/jobs"))
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              jobs: [
+                {
+                  schemaVersion: 1,
+                  id: "10000000-0000-4000-8000-000000000001",
+                  projectId: "20000000-0000-4000-8000-000000000001",
+                  type: "asset_ingestion",
+                  status: "completed",
+                  progressBasisPoints: 10000,
+                  currentStepKey: "inspect_asset",
+                  attemptCount: 1,
+                  failureCode: null,
+                  createdAt: "2026-08-09T00:00:00.000Z",
+                  startedAt: "2026-08-09T00:00:01.000Z",
+                  finishedAt: "2026-08-09T00:00:02.000Z",
+                  updatedAt: "2026-08-09T00:00:02.000Z",
+                  version: 3,
+                },
+              ],
+              nextCursor: null,
+            }),
+          ),
+        );
+      return Promise.resolve(
+        new Response(JSON.stringify({ projects: [], nextCursor: null })),
+      );
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("asset ingestion")).toBeInTheDocument();
+    expect(screen.getByText("completed · attempt 1")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("inspect_asset")).toBeInTheDocument();
   });
 
   it("keeps the CSRF token in memory while approving a pending user", async () => {
@@ -236,6 +302,10 @@ describe("App", () => {
             ),
           );
         }
+        if (url.startsWith("/api/v1/jobs"))
+          return Promise.resolve(
+            new Response(JSON.stringify({ jobs: [], nextCursor: null })),
+          );
         return Promise.resolve(
           new Response(JSON.stringify({ projects: [], nextCursor: null })),
         );
@@ -244,7 +314,7 @@ describe("App", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(8));
     const approvalCall = fetchMock.mock.calls.find(
       ([input, init]) =>
         requestUrl(input).startsWith("/api/v1/admin/users/") &&

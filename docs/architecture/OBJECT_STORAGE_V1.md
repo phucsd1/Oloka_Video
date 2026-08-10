@@ -1,6 +1,6 @@
 # Object Storage V1
 
-Status: Slice 3D implementation in review; production cutover pending.
+Status: Slice 3D implemented, merged, and production cutover complete; private Asset durability verified on HF normal restart.
 
 ## Scope
 

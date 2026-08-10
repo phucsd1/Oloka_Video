@@ -1,12 +1,12 @@
 # Database Migration Strategy
 
-Status: normative; migrations v1/v2 are immutable and migration v3 is implemented for Slice 3B review.
+Status: normative; migrations v1-v5 are immutable production history. Migration v6 is implemented on the Phase 3E review branch and is not applied in production.
 
 ## Contract
 
 Migrations are numbered, named, immutable, forward-only SQL assets executed before the HTTP listener starts. The runner records version, name, SHA-256 checksum, applied time, execution duration, and application build SHA in `schema_migrations`. It refuses startup on a checksum/name mismatch, gap, duplicate version, failed migration, or database schema newer than the application.
 
-The merged Persistence Kernel database is schema version 2. Slice 3B advances a reviewed database to schema version 3 through `0003-identity-and-approval.sql` without altering a byte of v1/v2. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
+Production remains schema version 5. Phase 3E advances an approved review database to schema version 6 through `0006-durable-job-kernel.sql` without altering a byte of v1-v5. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
 
 ## Ledger compatibility
 
@@ -21,16 +21,16 @@ The migration test fixture must begin from the actual v1 schema, not a reconstru
 
 ## Planned sequence
 
-| Version | Name                  | Purpose                                                                                                                          | Phase 3 slice   |
-| ------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| 1       | foundation            | Existing `schema_migrations` and `system_metadata`                                                                               | already present |
-| 2       | persistence-kernel    | checksum ledger, integer time, metadata normalization, User shell with approval/status evidence, outbox/audit/idempotency kernel | 3A              |
-| 3       | identity-and-approval | OAuth identities/AEAD transactions, sessions with redacted security metadata, credential references and identity indexes         | 3B              |
-| 4       | canonical-project     | Project without current-composition pointer; quota policies with effective intervals and reservations                            | 3C              |
-| 5       | private-assets        | Assets including purge timestamps, upload sessions with canonical offset/chunk evidence, delivery capabilities                   | 3D              |
-| 6       | durable-job-kernel    | generic provider-independent Jobs/Steps/Events, submission-intent fields and dispatcher indexes; no composition FKs              | 3E              |
-| 7       | compositions-preview  | immutable versions/references, Project current pointer, generation/composition lineage on Jobs, versioned preview artifacts      | 3F              |
-| 8       | render-outputs        | render-only Job lineage not used before 3H, immutable output core/codecs and guarded output state                                | 3H              |
+| Version | Name                  | Purpose                                                                                                                                                              | Phase 3 slice   |
+| ------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| 1       | foundation            | Existing `schema_migrations` and `system_metadata`                                                                                                                   | already present |
+| 2       | persistence-kernel    | checksum ledger, integer time, metadata normalization, User shell with approval/status evidence, outbox/audit/idempotency kernel                                     | 3A              |
+| 3       | identity-and-approval | OAuth identities/AEAD transactions, sessions with redacted security metadata, credential references and identity indexes                                             | 3B              |
+| 4       | canonical-project     | Project without current-composition pointer; no quota tables                                                                                                         | 3C              |
+| 5       | private-assets        | Assets including purge timestamps, upload sessions with canonical offset/chunk evidence, delivery capabilities                                                       | 3D              |
+| 6       | durable-job-kernel    | generic provider-independent Jobs/Steps/Events, first canonical quota policy/reservation tables, submission-intent fields and dispatcher indexes; no composition FKs | 3E              |
+| 7       | compositions-preview  | immutable versions/references, Project current pointer, generation/composition lineage on Jobs, versioned preview artifacts                                          | 3F              |
+| 8       | render-outputs        | render-only Job lineage not used before 3H, immutable output core/codecs and guarded output state                                                                    | 3H              |
 
 Version ownership may be split further during Phase 3 review, but ordering and
 dependencies may not be collapsed into runtime auto-migration. The final schema
@@ -88,3 +88,5 @@ entries, application migrations, or authorization/product entities. The
 Slice 3A's allowlist remains the six original application tables. Slice 3B adds
 only `oauth_identities`, `oauth_transactions`, `sessions`, and
 `provider_credential_references`.
+
+The restore process bound remains 120 seconds. The observed production restore near 99.35 seconds is operational debt with limited headroom; Phase 3E does not increase the timeout.

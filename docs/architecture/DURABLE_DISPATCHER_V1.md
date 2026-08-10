@@ -1,5 +1,7 @@
 # Durable Dispatcher V1
 
+Status: Phase 3E implementation in review. Asset ingestion is the only enabled handler; production cutover is pending.
+
 ## Runtime model
 
 One in-process dispatcher runs inside the single HF application instance. SQLite is the durable source; memory only holds bounded active-work bookkeeping and wake signals. Restarting the process loses no admitted job.

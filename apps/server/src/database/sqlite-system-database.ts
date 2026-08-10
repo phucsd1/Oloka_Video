@@ -170,6 +170,10 @@ export class SqliteSystemDatabase implements SystemDatabase {
       }
       if (currentVersion === 4) {
         this.applyPrivateAssetsMigration(migrations[4]);
+        currentVersion = 5;
+      }
+      if (currentVersion === 5) {
+        this.applyDurableJobKernelMigration(migrations[5]);
       }
       this.verifyAppliedMigrations(migrations);
       this.migrationFailure = undefined;
@@ -293,7 +297,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
       this.assertExactFoundationColumns();
       return;
     }
-    if (version >= 2 && version <= 5) {
+    if (version >= 2 && version <= 6) {
       const expectedTables =
         version === 2
           ? [
@@ -331,22 +335,44 @@ export class SqliteSystemDatabase implements SystemDatabase {
                   "system_metadata",
                   "users",
                 ]
-              : [
-                  "assets",
-                  "audit_events",
-                  "delivery_capabilities",
-                  "idempotency_records",
-                  "oauth_identities",
-                  "oauth_transactions",
-                  "outbox_events",
-                  "projects",
-                  "provider_credential_references",
-                  "schema_migrations",
-                  "sessions",
-                  "system_metadata",
-                  "upload_sessions",
-                  "users",
-                ];
+              : version === 5
+                ? [
+                    "assets",
+                    "audit_events",
+                    "delivery_capabilities",
+                    "idempotency_records",
+                    "oauth_identities",
+                    "oauth_transactions",
+                    "outbox_events",
+                    "projects",
+                    "provider_credential_references",
+                    "schema_migrations",
+                    "sessions",
+                    "system_metadata",
+                    "upload_sessions",
+                    "users",
+                  ]
+                : [
+                    "assets",
+                    "audit_events",
+                    "delivery_capabilities",
+                    "idempotency_records",
+                    "job_events",
+                    "job_steps",
+                    "jobs",
+                    "oauth_identities",
+                    "oauth_transactions",
+                    "outbox_events",
+                    "projects",
+                    "provider_credential_references",
+                    "quota_policies",
+                    "quota_reservations",
+                    "schema_migrations",
+                    "sessions",
+                    "system_metadata",
+                    "upload_sessions",
+                    "users",
+                  ];
       const applicationTables = tables.filter(
         (table) => !table.startsWith("_litestream_"),
       );
@@ -550,6 +576,31 @@ export class SqliteSystemDatabase implements SystemDatabase {
     });
   }
 
+  private applyDurableJobKernelMigration(
+    migration: MigrationAsset | undefined,
+  ): void {
+    if (migration?.version !== 6)
+      throw new Error("Durable Job kernel migration is missing");
+    const startedAt = this.clock.now();
+    this.transactions.run("immediate", ({ database }) => {
+      database.exec(migration.sql);
+      database
+        .prepare(
+          `INSERT INTO schema_migrations
+            (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          migration.version,
+          migration.name,
+          migration.checksum,
+          this.clock.now(),
+          Math.max(0, this.clock.now() - startedAt),
+          this.appBuildSha,
+        );
+    });
+  }
+
   private verifyAppliedMigrations(migrations: MigrationAsset[]): void {
     const rows = this.database
       .prepare(
@@ -597,6 +648,7 @@ async function loadMigrationAssets(): Promise<MigrationAsset[]> {
     [3, "identity-and-approval", "0003-identity-and-approval.sql"],
     [4, "canonical-project", "0004-canonical-project.sql"],
     [5, "private-assets", "0005-private-assets.sql"],
+    [6, "durable-job-kernel", "0006-durable-job-kernel.sql"],
   ] as const;
   return Promise.all(
     definitions.map(async ([version, name, filename]) => {

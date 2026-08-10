@@ -11,7 +11,7 @@ describe("BaselineQuotaPolicyResolver", () => {
 
     expect(
       resolver.resolve({ userId: "user-1", projectId: "project-1", at: 1 }),
-    ).toEqual({
+    ).toMatchObject({
       version: "test-small",
       maxAssetSizeBytes: 32,
       maxProjectStorageBytes: 64,

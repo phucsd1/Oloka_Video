@@ -23,7 +23,6 @@ import {
 } from "../database/repositories/asset-repository.js";
 import { AuditEventRepository } from "../database/repositories/audit-event-repository.js";
 import { IdempotencyRepository } from "../database/repositories/idempotency-repository.js";
-import { OutboxRepository } from "../database/repositories/outbox-repository.js";
 import {
   sha256CanonicalJson,
   canonicalizeJson,
@@ -33,6 +32,10 @@ import type { IdGenerator } from "../kernel/id-generator.js";
 import type { AuthenticatedSession } from "../identity/identity-service.js";
 import { ApplicationError } from "../http/application-error.js";
 import type { QuotaPolicyResolver } from "../quota/quota-policy.js";
+import {
+  JobAdmissionService,
+  type AdmittedJob,
+} from "../job/job-admission-service.js";
 
 export const MAX_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
@@ -47,6 +50,7 @@ export interface AssetServiceOptions {
   clock: Clock;
   idGenerator: IdGenerator;
   quotaPolicyResolver: QuotaPolicyResolver;
+  jobAdmissionService?: JobAdmissionService;
 }
 
 export interface AssetDeliveryDescriptor {
@@ -59,13 +63,20 @@ export class AssetService {
   private readonly assets = new AssetRepository();
   private readonly idempotency: IdempotencyRepository;
   private readonly audit: AuditEventRepository;
-  private readonly outbox: OutboxRepository;
   private readonly capabilityTokenKey: Buffer;
+  private readonly jobAdmission: JobAdmissionService;
 
   constructor(private readonly options: AssetServiceOptions) {
     this.idempotency = new IdempotencyRepository(options.idGenerator);
     this.audit = new AuditEventRepository(options.idGenerator);
-    this.outbox = new OutboxRepository(options.idGenerator);
+    this.jobAdmission =
+      options.jobAdmissionService ??
+      new JobAdmissionService({
+        transactions: options.transactions,
+        clock: options.clock,
+        idGenerator: options.idGenerator,
+        quotaPolicyResolver: options.quotaPolicyResolver,
+      });
     this.capabilityTokenKey = Buffer.from(
       hkdfSync(
         "sha256",
@@ -149,8 +160,11 @@ export class AssetService {
           throw new ApplicationError("PAYLOAD_TOO_LARGE", "asset_size_limit");
         const reserved = context.database
           .prepare(
-            `SELECT COALESCE((SELECT SUM(COALESCE(byte_size, 0)) FROM assets WHERE project_id = ? AND lifecycle_status != 'purged'), 0) +
-                COALESCE((SELECT SUM(declared_size) FROM upload_sessions WHERE project_id = ? AND status IN ('open','verifying')), 0) AS total`,
+            `SELECT COALESCE((SELECT SUM(COALESCE(byte_size, 0)) FROM assets
+                               WHERE project_id = ? AND lifecycle_status != 'purged'), 0) +
+                    COALESCE((SELECT SUM(amount) FROM quota_reservations
+                               WHERE project_id = ? AND resource_type = 'upload_bytes'
+                                 AND status = 'reserved'), 0) AS total`,
           )
           .get(projectId, projectId) as { total: number };
         if (
@@ -208,6 +222,23 @@ export class AssetService {
             updated_at: upload.updated_at,
           },
         });
+        context.database
+          .prepare(
+            `INSERT INTO quota_reservations
+              (id, user_id, project_id, resource_type, resource_id, amount, status,
+               expires_at, created_at, updated_at)
+             VALUES (?, ?, ?, 'upload_bytes', ?, ?, 'reserved', ?, ?, ?)`,
+          )
+          .run(
+            uploadId,
+            actor.user.id,
+            projectId,
+            uploadId,
+            request.declaredSize,
+            now + UPLOAD_TTL_MS,
+            now,
+            now,
+          );
         const asset = this.toAsset(this.assets.getAsset(context, assetId)!);
         const safeUpload = this.toUpload(
           this.assets.getUpload(context, uploadId)!,
@@ -414,7 +445,7 @@ export class AssetService {
     uploadId: string,
     request: UploadCompleteRequest,
     idempotencyKey: string,
-  ): Promise<{ asset: Asset; replayed: boolean }> {
+  ): Promise<{ asset: Asset; job?: AdmittedJob; replayed: boolean }> {
     const now = this.options.clock.now();
     const state = this.options.transactions.run("immediate", (context) => {
       const upload = this.assets.getOwnedUpload(
@@ -441,7 +472,7 @@ export class AssetService {
       if (begin.kind === "replay")
         return {
           kind: "replay" as const,
-          response: begin.response as { asset: Asset },
+          response: begin.response as { asset: Asset; job?: AdmittedJob },
         };
       if (begin.kind !== "started" && begin.kind !== "retryable")
         throw idempotencyError(begin.kind);
@@ -472,10 +503,10 @@ export class AssetService {
         recordId: begin.recordId,
       };
     });
-    if (state.kind === "replay")
-      return { asset: state.response.asset, replayed: true };
+    if (state.kind === "replay") return { ...state.response, replayed: true };
     let finalizationAttempted = false;
     let terminalRejected = false;
+    let completedJob: AdmittedJob | undefined;
     try {
       let staged;
       try {
@@ -607,23 +638,34 @@ export class AssetService {
           metadata: { byteSize: staged.size, verifiedMime: detected.mime },
           createdAt: this.options.clock.now(),
         });
-        this.outbox.enqueue(context, {
-          topic: "asset.ingestion.requested",
-          aggregateType: "asset",
-          aggregateId: state.asset.id,
-          payload: { assetId: state.asset.id },
-          availableAt: this.options.clock.now(),
-          createdAt: this.options.clock.now(),
-        });
+        const reservation = context.database
+          .prepare(
+            `UPDATE quota_reservations
+             SET status = 'consumed', expires_at = NULL, updated_at = ?, version = version + 1
+             WHERE resource_type = 'upload_bytes' AND resource_id = ? AND status = 'reserved'`,
+          )
+          .run(this.options.clock.now(), uploadId);
+        if (reservation.changes !== 1)
+          throw new ApplicationError(
+            "RESOURCE_STATE_CONFLICT",
+            "upload_quota_reservation_conflict",
+          );
+        const job = this.jobAdmission.admitAssetIngestionInTransaction(
+          context,
+          actor,
+          { projectId: state.upload.project_id, assetId: state.asset.id },
+          this.options.clock.now(),
+        );
         const asset = this.toAsset(
           this.assets.getAsset(context, state.asset.id)!,
         );
         this.idempotency.complete(context, {
           recordId: state.recordId,
           responseStatus: 200,
-          response: { asset },
+          response: { asset, job },
           resourceId: state.asset.id,
         });
+        completedJob = job;
       });
     } catch (error) {
       if (!terminalRejected) {
@@ -656,8 +698,11 @@ export class AssetService {
         "upload_finalize_failed",
       );
     }
-    await this.processPendingIngestion(10);
-    return { asset: this.getAsset(actor, state.asset.id), replayed: false };
+    return {
+      asset: this.getAsset(actor, state.asset.id),
+      ...(completedJob === undefined ? {} : { job: completedJob }),
+      replayed: false,
+    };
   }
 
   abortUpload(actor: AuthenticatedSession, uploadId: string): void {
@@ -671,6 +716,13 @@ export class AssetService {
         throw new ApplicationError("RESOURCE_NOT_FOUND", "upload_not_found");
       if (upload.status === "completed") return null;
       this.assets.abortUpload(context, uploadId, this.options.clock.now());
+      context.database
+        .prepare(
+          `UPDATE quota_reservations SET status = 'released', expires_at = NULL,
+             updated_at = ?, version = version + 1
+           WHERE resource_type = 'upload_bytes' AND resource_id = ? AND status = 'reserved'`,
+        )
+        .run(this.options.clock.now(), uploadId);
       this.audit.append(context, {
         actorUserId: actor.user.id,
         actorType: actor.user.role === "admin" ? "admin" : "user",
@@ -1100,7 +1152,9 @@ export class AssetService {
         const reserved = context.database
           .prepare(
             `SELECT COALESCE((SELECT SUM(COALESCE(byte_size, 0)) FROM assets WHERE project_id = ? AND lifecycle_status != 'purged'), 0) +
-                    COALESCE((SELECT SUM(declared_size) FROM upload_sessions WHERE project_id = ? AND status IN ('open','verifying')), 0) AS total`,
+                    COALESCE((SELECT SUM(amount) FROM quota_reservations
+                               WHERE project_id = ? AND resource_type = 'upload_bytes'
+                                 AND status = 'reserved'), 0) AS total`,
           )
           .get(asset.project_id, asset.project_id) as { total: number };
         if (
@@ -1124,6 +1178,23 @@ export class AssetService {
           throw new ApplicationError(
             "RESOURCE_STATE_CONFLICT",
             "asset_retry_conflict",
+          );
+        context.database
+          .prepare(
+            `INSERT INTO quota_reservations
+              (id, user_id, project_id, resource_type, resource_id, amount, status,
+               expires_at, created_at, updated_at, version)
+             VALUES (?, ?, ?, 'upload_bytes', ?, ?, 'reserved', ?, ?, ?, 1)`,
+          )
+          .run(
+            uploadId,
+            actor.user.id,
+            asset.project_id,
+            uploadId,
+            previousUpload.declared_size,
+            now + UPLOAD_TTL_MS,
+            now,
+            now,
           );
         const nextAsset = this.toAsset(this.assets.getAsset(context, assetId)!);
         const nextUpload = this.toUpload(
@@ -1429,6 +1500,13 @@ export class AssetService {
       context.database
         .prepare(
           "UPDATE upload_sessions SET status = 'rejected', updated_at = ?, version = version + 1 WHERE id = ? AND status = 'verifying'",
+        )
+        .run(this.options.clock.now(), uploadId);
+      context.database
+        .prepare(
+          `UPDATE quota_reservations SET status = 'released', expires_at = NULL,
+             updated_at = ?, version = version + 1
+           WHERE resource_type = 'upload_bytes' AND resource_id = ? AND status = 'reserved'`,
         )
         .run(this.options.clock.now(), uploadId);
       this.idempotency.markRetryableFailure(context, idempotencyRecordId);

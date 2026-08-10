@@ -283,4 +283,114 @@ describe("Slice 3A repositories", () => {
     expect(await consumer.runOnce()).toBe(0);
     await database.close();
   });
+
+  it("redelivers an expired event while an idempotent effect executes once", async () => {
+    const database = await createDatabase();
+    const repository = new OutboxRepository({
+      generate: () => "00000000-0000-4000-8000-000000000007",
+    });
+    database.transactions.run("immediate", (context) =>
+      repository.enqueue(context, {
+        topic: "job.state.changed",
+        aggregateType: "job",
+        aggregateId: "job-1",
+        payload: { status: "running" },
+        availableAt: 10,
+        createdAt: 10,
+      }),
+    );
+    const firstClaim = database.transactions.run("immediate", (context) =>
+      repository.claimBatch(context, {
+        leaseOwner: "worker-a",
+        now: 10,
+        leaseExpiresAt: 20,
+        limit: 1,
+      }),
+    );
+    const effects = new Set<string>();
+    let effectCalls = 1;
+    // Worker A applied the idempotent effect, then died before marking publish.
+    effects.add(firstClaim[0]!.aggregateId);
+    const registry = new OutboxHandlerRegistry();
+    registry.register("job.state.changed", (event) => {
+      effectCalls += 1;
+      effects.add(event.aggregateId);
+      return Promise.resolve();
+    });
+    const consumer = new OutboxConsumer(
+      database.transactions,
+      repository,
+      registry,
+      { now: () => 30 },
+      {
+        leaseOwner: "worker-b",
+        batchSize: 1,
+        concurrency: 1,
+        leaseDurationMs: 100,
+        maxAttempts: 3,
+        retryDelayMs: () => 1,
+      },
+    );
+    expect(firstClaim).toHaveLength(1);
+    expect(await consumer.runOnce()).toBe(1);
+    expect(effects).toEqual(new Set(["job-1"]));
+    expect(effectCalls).toBe(2);
+    expect(
+      database.transactions.run("read", ({ database: connection }) =>
+        connection
+          .prepare("SELECT status, attempt_count FROM outbox_events")
+          .get(),
+      ),
+    ).toEqual({ status: "published", attempt_count: 2 });
+    await database.close();
+  });
+
+  it("marks exhausted outbox delivery dead and exposes the operational count", async () => {
+    const database = await createDatabase();
+    const repository = new OutboxRepository({
+      generate: () => "00000000-0000-4000-8000-000000000008",
+    });
+    database.transactions.run("immediate", (context) =>
+      repository.enqueue(context, {
+        topic: "missing.topic",
+        aggregateType: "job",
+        aggregateId: "job-dead",
+        payload: { schemaVersion: 1 },
+        availableAt: 10,
+        createdAt: 10,
+      }),
+    );
+    const consumer = new OutboxConsumer(
+      database.transactions,
+      repository,
+      new OutboxHandlerRegistry(),
+      { now: () => 10 },
+      {
+        leaseOwner: "dead-worker",
+        batchSize: 1,
+        concurrency: 1,
+        leaseDurationMs: 100,
+        maxAttempts: 1,
+        retryDelayMs: () => 1,
+      },
+    );
+    expect(await consumer.runOnce()).toBe(1);
+    expect(
+      database.transactions.run("read", ({ database: connection }) =>
+        connection
+          .prepare("SELECT status, last_error_code FROM outbox_events")
+          .get(),
+      ),
+    ).toEqual({ status: "dead", last_error_code: "OUTBOX_HANDLER_MISSING" });
+    expect(
+      database.transactions.run("read", ({ database: connection }) =>
+        connection
+          .prepare(
+            "SELECT COUNT(*) AS count FROM outbox_events WHERE status = 'dead'",
+          )
+          .get(),
+      ),
+    ).toEqual({ count: 1 });
+    await database.close();
+  });
 });

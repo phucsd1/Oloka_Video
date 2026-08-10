@@ -1,7 +1,9 @@
 # Phase 3D Private Assets
 
-Status: implementation in review on `codex/phase3d-private-assets`; production
-cutover pending.
+Status: implemented, merged, and production cutover complete. Feature merge
+`c04576b5d905c2ef55997c53a90ed84e06512564`; forward correction
+`ce6f51845013c41c1906080354e631c026862cfd`; production schema v5 and private
+Asset durability across a normal HF restart were verified.
 
 ## Scope
 
@@ -22,7 +24,8 @@ render, generic Job, worker-lease, queue, SSE, or purge-worker functionality.
 
 Migrations v1-v4 remain byte-identical. Exact v4 databases receive one verified
 pre-migration backup with source v4, target v5, and pending migration `[5]`.
-Restarting an applied v5 database is a migration no-op.
+Restarting an applied v5 database is a migration no-op; Phase 3E creates new
+v6 quota/job tables separately.
 
 ## Upload and crash boundaries
 
@@ -73,7 +76,6 @@ private image/video/audio preview, download, and delete. It never constructs a
 
 ## Deployment boundary
 
-This branch may be tested, pushed, and reviewed as a draft PR. It must not be
-merged or deployed, must not run migration v5 against production, and must not
-upload production media. Production remains on the Phase 3C schema v4 runtime
-until a separate cutover authorization.
+The Phase 3D branch was merged and cut over only after its migration, restart,
+and private-byte durability gates passed. Phase 3E remains draft/local work: it
+must not be merged or deployed and must not run migration v6 in production.

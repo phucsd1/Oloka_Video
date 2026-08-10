@@ -52,15 +52,24 @@ export class AssetMaintenanceService {
     );
     for (const upload of uploads) {
       if (upload.expires_at <= now) {
-        const expired = this.transactions.run("immediate", ({ database }) =>
-          Number(
+        const expired = this.transactions.run("immediate", ({ database }) => {
+          const changed = Number(
             database
               .prepare(
                 "UPDATE upload_sessions SET status = 'expired', updated_at = ?, version = version + 1 WHERE id = ? AND status = 'open'",
               )
               .run(now, upload.id).changes,
-          ),
-        );
+          );
+          if (changed === 1)
+            database
+              .prepare(
+                `UPDATE quota_reservations SET status = 'expired', expires_at = NULL,
+                   updated_at = ?, version = version + 1
+                 WHERE resource_type = 'upload_bytes' AND resource_id = ? AND status = 'reserved'`,
+              )
+              .run(now, upload.id);
+          return changed;
+        });
         if (expired === 1) {
           result.expired += 1;
           await this.storage
@@ -84,6 +93,13 @@ export class AssetMaintenanceService {
               "UPDATE assets SET ingestion_status = 'failed', failure_code = 'STORAGE_UNAVAILABLE', updated_at = ?, version = version + 1 WHERE id = ?",
             )
             .run(now, upload.asset_id);
+          database
+            .prepare(
+              `UPDATE quota_reservations SET status = 'released', expires_at = NULL,
+                 updated_at = ?, version = version + 1
+               WHERE resource_type = 'upload_bytes' AND resource_id = ? AND status = 'reserved'`,
+            )
+            .run(now, upload.id);
         });
         result.quarantinedDatabaseAhead += 1;
         continue;
@@ -219,6 +235,13 @@ export class AssetMaintenanceService {
           "UPDATE idempotency_records SET status = 'failed_retryable', response_status = NULL, response_json = NULL, resource_id = NULL WHERE operation = ? AND status = 'in_progress'",
         )
         .run(`upload.complete:${upload.id}`);
+      database
+        .prepare(
+          `UPDATE quota_reservations SET status = 'released', expires_at = NULL,
+             updated_at = ?, version = version + 1
+           WHERE resource_type = 'upload_bytes' AND resource_id = ? AND status = 'reserved'`,
+        )
+        .run(now, upload.id);
     });
   }
 }

@@ -1,6 +1,6 @@
 # Delivery Protocol V1
 
-Status: Slice 3D implementation in review; production cutover pending.
+Status: Slice 3D implemented, merged, and production cutover complete; production schema v5 durability verified.
 
 ## Authorization path
 

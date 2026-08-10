@@ -22,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("database migrations", () => {
-  it("preserves prior tables and adds only the authorized Slice 3D tables", async () => {
+  it("preserves prior tables and adds only the authorized Slice 3E tables", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const database = await SqliteSystemDatabase.connect(
@@ -36,11 +36,16 @@ describe("database migrations", () => {
       "audit_events",
       "delivery_capabilities",
       "idempotency_records",
+      "job_events",
+      "job_steps",
+      "jobs",
       "oauth_identities",
       "oauth_transactions",
       "outbox_events",
       "projects",
       "provider_credential_references",
+      "quota_policies",
+      "quota_reservations",
       "schema_migrations",
       "sessions",
       "system_metadata",
@@ -56,7 +61,7 @@ describe("database migrations", () => {
           )
           .all(),
     ) as Array<Record<string, unknown>>;
-    expect(ledger).toHaveLength(5);
+    expect(ledger).toHaveLength(6);
     expect(ledger[0]).toMatchObject({
       version: 1,
       name: "foundation_system_tables",
@@ -109,10 +114,22 @@ describe("database migrations", () => {
         ),
       ),
     });
+    expect(ledger[5]).toMatchObject({
+      version: 6,
+      name: "durable-job-kernel",
+      checksum_sha256: sha256Hex(
+        await readFile(
+          new URL(
+            "../../migrations/0006-durable-job-kernel.sql",
+            import.meta.url,
+          ),
+        ),
+      ),
+    });
     await database.close();
   });
 
-  it("applies migrations v1 through v5 on a fresh database", async () => {
+  it("applies migrations v1 through v6 on a fresh database", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const database = await SqliteSystemDatabase.connect(
@@ -136,6 +153,7 @@ describe("database migrations", () => {
       { version: 3, name: "identity-and-approval" },
       { version: 4, name: "canonical-project" },
       { version: 5, name: "private-assets" },
+      { version: 6, name: "durable-job-kernel" },
     ]);
     await database.close();
   });
@@ -213,8 +231,8 @@ describe("database migrations", () => {
     );
     expect(manifest).toMatchObject({
       sourceSchemaVersion: 1,
-      targetSchemaVersion: 5,
-      migrationVersionsPending: [2, 3, 4, 5],
+      targetSchemaVersion: 6,
+      migrationVersionsPending: [2, 3, 4, 5, 6],
       appBuildSha: "test-build",
     });
     await expect(
@@ -258,7 +276,7 @@ describe("database migrations", () => {
     await database.close();
   });
 
-  it("creates one verified v2-to-v5 backup and no new backup on restart", async () => {
+  it("creates one verified v2-to-v6 backup and no new backup on restart", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);
     const databasePath = join(directory, "database.sqlite");
@@ -306,8 +324,8 @@ describe("database migrations", () => {
       ),
     ).resolves.toMatchObject({
       sourceSchemaVersion: 2,
-      targetSchemaVersion: 5,
-      migrationVersionsPending: [3, 4, 5],
+      targetSchemaVersion: 6,
+      migrationVersionsPending: [3, 4, 5, 6],
     });
     await database.migrate();
     expect(await readdir(join(backupRoot, "pre-migration"))).toEqual([
@@ -316,7 +334,7 @@ describe("database migrations", () => {
     await database.close();
   });
 
-  it("creates one verified exact-v3-to-v5 backup and applies later migrations once", async () => {
+  it("creates one verified exact-v3-to-v6 backup and applies later migrations once", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-v3-"));
     temporaryDirectories.push(directory);
     const databasePath = join(directory, "database.sqlite");
@@ -377,8 +395,8 @@ describe("database migrations", () => {
       ),
     ).resolves.toMatchObject({
       sourceSchemaVersion: 3,
-      targetSchemaVersion: 5,
-      migrationVersionsPending: [4, 5],
+      targetSchemaVersion: 6,
+      migrationVersionsPending: [4, 5, 6],
     });
     const beforeRestart = database.transactions.run("read", ({ database }) =>
       database
