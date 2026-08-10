@@ -1,6 +1,6 @@
 # API Contract V1
 
-Status: capability map and transport contract. Slice 3C and Slice 3D owner APIs are implemented, merged, and production-cutover complete; Phase 3E Job/admin/quota APIs are implemented for schema-v6 review and are not deployed.
+Status: capability map and transport contract. Slice 3C, Slice 3D, and the schema-v6 Phase 3E core are implemented, merged, and production-cutover complete; the Phase 3E.3 transactional-outbox runtime correction is not deployed until its later cutover verification. Phase 3F has not started.
 
 ## Protocol conventions
 

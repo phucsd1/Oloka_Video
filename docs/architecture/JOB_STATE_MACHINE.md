@@ -1,6 +1,6 @@
 # Durable Job State Machine
 
-Status: the exhaustive Job and JobStep transition matrices are implemented for Phase 3E review; production remains schema v5.
+Status: the exhaustive Job and JobStep transition matrices are live in the schema-v6 Phase 3E core cut over at merge `f6761312ea30f9cc76503447be84e37b758d05f5`. Phase 3E.3 corrects outbox runtime wiring without changing these matrices or schema; the correction is not yet deployed. Phase 3F has not started.
 
 ## Decision
 

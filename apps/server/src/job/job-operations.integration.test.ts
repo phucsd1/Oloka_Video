@@ -34,6 +34,87 @@ afterEach(async () => {
 });
 
 describe("Job operations snapshot", () => {
+  it("reports pending, dead, and redelivery evidence from durable outbox rows", async () => {
+    const harness = await createHarness();
+    try {
+      harness.database.transactions.run(
+        "immediate",
+        ({ database: connection }) => {
+          const insert = connection.prepare(
+            `INSERT INTO outbox_events
+              (id,topic,aggregate_type,aggregate_id,payload_json,status,
+               available_at,attempt_count,last_error_code,published_at,created_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          );
+          insert.run(
+            "90000000-0000-4000-8000-000000000001",
+            "job.state.changed",
+            "job",
+            "job-pending",
+            "{}",
+            "pending",
+            1,
+            0,
+            null,
+            null,
+            1,
+          );
+          insert.run(
+            "90000000-0000-4000-8000-000000000002",
+            "unknown.topic",
+            "job",
+            "job-dead",
+            "{}",
+            "dead",
+            1,
+            1,
+            "OUTBOX_HANDLER_MISSING",
+            null,
+            1,
+          );
+          insert.run(
+            "90000000-0000-4000-8000-000000000003",
+            "job.state.changed",
+            "job",
+            "job-redelivered",
+            "{}",
+            "published",
+            1,
+            2,
+            "OUTBOX_HANDLER_FAILED",
+            2,
+            1,
+          );
+        },
+      );
+
+      expect(harness.service.operations(harness.admin)).toMatchObject({
+        outboxPendingCurrent: 1,
+        outboxDeadDurable: 1,
+        outboxRedeliveryDurable: 1,
+      });
+
+      harness.database.transactions.run(
+        "immediate",
+        ({ database: connection }) =>
+          connection
+            .prepare(
+              `UPDATE outbox_events SET status = 'published', published_at = 3
+               WHERE id = '90000000-0000-4000-8000-000000000001'`,
+            )
+            .run(),
+      );
+      const restarted = operationsService(harness, new JobOperationsActivity());
+      expect(restarted.operations(harness.admin)).toMatchObject({
+        outboxPendingCurrent: 0,
+        outboxDeadDurable: 1,
+        outboxRedeliveryDurable: 1,
+      });
+    } finally {
+      await harness.database.close();
+    }
+  });
+
   it("labels current database state without presenting it as activity counters", async () => {
     const harness = await createHarness();
     try {

@@ -393,4 +393,56 @@ describe("Slice 3A repositories", () => {
     ).toEqual({ count: 1 });
     await database.close();
   });
+
+  it("dead-letters a known handler after its configured attempts are exhausted", async () => {
+    const database = await createDatabase();
+    const repository = new OutboxRepository({
+      generate: () => "00000000-0000-4000-8000-000000000009",
+    });
+    database.transactions.run("immediate", (context) =>
+      repository.enqueue(context, {
+        topic: "kernel.exhausted",
+        aggregateType: "system",
+        aggregateId: "exhausted",
+        payload: { schemaVersion: 1 },
+        availableAt: 10,
+        createdAt: 10,
+      }),
+    );
+    const registry = new OutboxHandlerRegistry();
+    registry.register("kernel.exhausted", () =>
+      Promise.reject(new Error("transient detail must not persist")),
+    );
+    const consumer = new OutboxConsumer(
+      database.transactions,
+      repository,
+      registry,
+      { now: () => 10 },
+      {
+        leaseOwner: "dead-letter-worker",
+        batchSize: 1,
+        concurrency: 1,
+        leaseDurationMs: 100,
+        maxAttempts: 2,
+        retryDelayMs: () => 0,
+      },
+    );
+
+    expect(await consumer.runOnce()).toBe(1);
+    expect(await consumer.runOnce()).toBe(1);
+    expect(
+      database.transactions.run("read", ({ database: connection }) =>
+        connection
+          .prepare(
+            "SELECT status, attempt_count, last_error_code FROM outbox_events",
+          )
+          .get(),
+      ),
+    ).toEqual({
+      status: "dead",
+      attempt_count: 2,
+      last_error_code: "OUTBOX_HANDLER_FAILED",
+    });
+    await database.close();
+  });
 });
