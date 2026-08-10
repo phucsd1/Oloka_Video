@@ -389,10 +389,14 @@ seed_asset_job_state() {
   local container="$1"
   docker exec "$container" node --input-type=module -e '
     import { mkdirSync, writeFileSync } from "node:fs";
-    import { createHash } from "node:crypto";
+    import { createHash, randomUUID } from "node:crypto";
     import { DatabaseSync } from "node:sqlite";
+    import { pathToFileURL } from "node:url";
+    import { SqliteSystemDatabase } from "/app/apps/server/dist/database/sqlite-system-database.js";
+    import { JobRepository } from "/app/apps/server/dist/job/job-repository.js";
     const database = new DatabaseSync("/var/lib/oloka/database/oloka.db");
     const now = Date.now();
+    const claimNow = now + 60_000;
     const userId = "00000000-0000-4000-8000-000000000101";
     const project = database.prepare("SELECT id FROM projects ORDER BY id LIMIT 1").get();
     if (!project) process.exit(1);
@@ -401,6 +405,7 @@ seed_asset_job_state() {
     const stepId = "00000000-0000-4000-8000-000000000203";
     const bytes = Buffer.from("oloka-durable-asset-job-fixture-v1", "utf8");
     const checksum = createHash("sha256").update(bytes).digest("hex");
+    let preClaim;
     mkdirSync("/data/recovery/assets", { recursive: true });
     writeFileSync("/data/recovery/assets/recovery-asset.mp4", bytes, { flag: "wx" });
     database.exec("BEGIN IMMEDIATE");
@@ -416,35 +421,73 @@ seed_asset_job_state() {
         );
       database.prepare(`INSERT INTO jobs
         (id, project_id, owner_user_id, type, status, request_json, current_step_key,
-         attempt_count, max_attempts, available_at, lease_owner, lease_expires_at,
-         heartbeat_at, created_at, started_at, updated_at, version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          jobId, project.id, userId, "asset_ingestion", "running",
-          JSON.stringify({ schemaVersion: 1, assetId }), "inspect_asset", 1, 3, now,
-          "worker-A", now - 1, now - 2, now - 100, now - 100, now, 2,
+         attempt_count, max_attempts, available_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          jobId, project.id, userId, "asset_ingestion", "queued",
+          JSON.stringify({ schemaVersion: 1, assetId }), "inspect_asset", 0, 3,
+          claimNow, now, now,
         );
       database.prepare(`INSERT INTO job_steps
         (id, job_id, step_key, item_key, status, attempt_count, max_attempts,
-         available_at, lease_owner, lease_expires_at, heartbeat_at, input_json,
-         created_at, started_at, updated_at, version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          stepId, jobId, "inspect_asset", "", "running", 1, 3, now,
-          "worker-A", now - 1, now - 2, JSON.stringify({ schemaVersion: 1, assetId }),
-          now - 100, now - 100, now, 2,
+         available_at, input_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          stepId, jobId, "inspect_asset", "", "pending", 0, 3, claimNow,
+          JSON.stringify({ schemaVersion: 1, assetId }), now, now,
         );
       const append = database.prepare("INSERT INTO job_events (id, job_id, sequence, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)");
-      append.run("00000000-0000-4000-8000-000000000204", jobId, 1, "job.queued", JSON.stringify({ schemaVersion: 1, jobId, status: "queued" }), now - 100);
-      append.run("00000000-0000-4000-8000-000000000205", jobId, 2, "job.started", JSON.stringify({ schemaVersion: 1, jobId, status: "running", attempt: 1 }), now - 100);
+      append.run("00000000-0000-4000-8000-000000000204", jobId, 1, "job.queued", JSON.stringify({ schemaVersion: 1, jobId, status: "queued" }), now);
       database.exec("COMMIT");
+      preClaim = database.prepare(`SELECT
+        j.status AS jobStatus, s.status AS stepStatus,
+        j.attempt_count AS jobAttemptCount, s.attempt_count AS stepAttemptCount,
+        j.lease_owner AS jobLeaseOwner, s.lease_owner AS stepLeaseOwner,
+        (SELECT GROUP_CONCAT(sequence, char(44)) FROM job_events WHERE job_id = j.id ORDER BY sequence) AS eventSequences
+        FROM jobs j JOIN job_steps s ON s.job_id = j.id WHERE j.id = ?`).get(jobId);
+      if (preClaim.jobStatus !== "queued" || preClaim.stepStatus !== "pending" ||
+          preClaim.jobAttemptCount !== 0 || preClaim.stepAttemptCount !== 0 ||
+          preClaim.jobLeaseOwner !== null || preClaim.stepLeaseOwner !== null ||
+          preClaim.eventSequences !== "1") throw new Error("Boot 1 pre-claim evidence invalid");
     } catch (error) {
       if (database.isTransaction) database.exec("ROLLBACK");
       throw error;
     } finally {
       database.close();
     }
+    const canonical = await SqliteSystemDatabase.connect(pathToFileURL("/var/lib/oloka/database/oloka.db").href);
+    const repository = new JobRepository({ generate: () => randomUUID() });
+    let claim;
+    let claimedState;
+    try {
+      claim = canonical.transactions.run("immediate", (context) => repository.claimNext(context, {
+        leaseOwner: "worker-A",
+        now: claimNow,
+        leaseDurationMs: 1_000,
+      }));
+      if (!claim || claim.jobId !== jobId || claim.stepId !== stepId || claim.attemptCount !== 1) {
+        throw new Error("canonical worker-A claim failed");
+      }
+      claimedState = canonical.transactions.run("read", ({ database }) => database.prepare(`SELECT
+        j.status AS jobStatus, s.status AS stepStatus, j.lease_owner AS leaseOwner,
+        j.attempt_count AS attemptCount, j.version AS jobVersion, s.version AS stepVersion,
+        (SELECT GROUP_CONCAT(sequence, char(44)) FROM job_events WHERE job_id = j.id ORDER BY sequence) AS eventSequences,
+        (SELECT COUNT(*) FROM outbox_events WHERE aggregate_id = j.id AND topic = ?) AS stateOutbox
+        FROM jobs j JOIN job_steps s ON s.job_id = j.id WHERE j.id = ?`).get("job.state.changed", jobId));
+      if (claimedState.jobStatus !== "running" || claimedState.stepStatus !== "running" ||
+          claimedState.leaseOwner !== "worker-A" || claimedState.attemptCount !== 1 ||
+          claimedState.eventSequences !== "1,2,3" || claimedState.stateOutbox !== 1) {
+        throw new Error("canonical worker-A claim evidence invalid");
+      }
+    } finally {
+      await canonical.close();
+    }
     writeFileSync("/data/recovery/boot1-job-evidence.json", JSON.stringify({
-      assetId, jobId, stepId, checksum, jobVersion: 2, stepVersion: 2,
-      leaseOwner: "worker-A", leaseExpiresAt: now - 1, eventMaxSequence: 2,
+      assetId, jobId, stepId, checksum,
+      preClaim,
+      jobStatus: claimedState.jobStatus, stepStatus: claimedState.stepStatus,
+      attemptCount: claimedState.attemptCount, jobVersion: claim.jobVersion,
+      stepVersion: claim.stepVersion, leaseOwner: claim.leaseOwner,
+      leaseExpiresAt: claim.leaseExpiresAt, eventSequences: claimedState.eventSequences,
+      eventMaxSequence: 3, stateOutbox: claimedState.stateOutbox,
     }), { flag: "w" });
   '
 }
@@ -453,20 +496,31 @@ recover_asset_job_boot2() {
   local container="$1"
   docker exec "$container" node --input-type=module -e '
     import { randomUUID } from "node:crypto";
+    import { readFileSync } from "node:fs";
     import { pathToFileURL } from "node:url";
     import { SqliteSystemDatabase } from "/app/apps/server/dist/database/sqlite-system-database.js";
     import { JobRepository } from "/app/apps/server/dist/job/job-repository.js";
     const database = await SqliteSystemDatabase.connect(pathToFileURL("/var/lib/oloka/database/oloka.db").href);
     const repository = new JobRepository({ generate: () => randomUUID() });
     const ids = { assetId: "00000000-0000-4000-8000-000000000201", jobId: "00000000-0000-4000-8000-000000000202", stepId: "00000000-0000-4000-8000-000000000203" };
+    const boot1 = JSON.parse(readFileSync("/data/recovery/boot1-job-evidence.json", "utf8"));
     try {
-      const now = Date.now();
+      const restored = database.transactions.run("read", ({ database }) => database.prepare(`SELECT
+        j.status AS jobStatus, s.status AS stepStatus, j.lease_owner AS leaseOwner,
+        j.attempt_count AS attemptCount, j.version AS jobVersion, s.version AS stepVersion,
+        (SELECT GROUP_CONCAT(sequence, char(44)) FROM job_events WHERE job_id = j.id ORDER BY sequence) AS eventSequences
+        FROM jobs j JOIN job_steps s ON s.job_id = j.id WHERE j.id = ?`).get(ids.jobId));
+      if (restored.jobStatus !== boot1.jobStatus || restored.stepStatus !== boot1.stepStatus ||
+          restored.leaseOwner !== boot1.leaseOwner || restored.attemptCount !== boot1.attemptCount ||
+          restored.jobVersion !== boot1.jobVersion || restored.stepVersion !== boot1.stepVersion ||
+          restored.eventSequences !== boot1.eventSequences) throw new Error("Boot 2 did not restore exact worker-A claim");
+      const now = boot1.leaseExpiresAt + 1;
       database.transactions.run("immediate", (context) => repository.reconcile(context, now));
       const claim = database.transactions.run("immediate", (context) => repository.claimNext(context, { leaseOwner: "worker-B", now: now + 1, leaseDurationMs: 60_000 }));
       if (!claim || claim.jobId !== ids.jobId) throw new Error("worker-B did not claim recovered Job");
       let stale = "VERSION_CONFLICT";
       try {
-        database.transactions.run("immediate", (context) => repository.completeAssetIngestion(context, { ...ids, leaseOwner: "worker-A", expectedJobVersion: 2, expectedStepVersion: 2, now: now + 2 }));
+        database.transactions.run("immediate", (context) => repository.completeAssetIngestion(context, { ...ids, leaseOwner: boot1.leaseOwner, expectedJobVersion: boot1.jobVersion, expectedStepVersion: boot1.stepVersion, now: now + 2 }));
         stale = "INCORRECTLY_ACCEPTED";
       } catch (error) {
         if (!(error instanceof Error) || !error.message.includes("job_lease_conflict")) throw error;
@@ -597,7 +651,7 @@ for boot in 1 2 3; do
       d.steps.length === 1 && d.steps[0].id === "00000000-0000-4000-8000-000000000203" &&
       (boot === 1 ? d.jobs[0].status === "running" && d.jobs[0].attempt_count === 1 && d.jobs[0].lease_owner === "worker-A" && d.assets[0].ingestion_status === "processing" :
         d.jobs[0].status === "completed" && d.jobs[0].progress_basis_points === 10000 && d.jobs[0].attempt_count === 2 && d.steps[0].status === "completed" && d.assets[0].ingestion_status === "ready") &&
-      (boot === 1 ? d.jobEvents[0].sequences === "1,2" : d.jobEvents[0].max_sequence >= 7);
+      (boot === 1 ? d.jobEvents[0].sequences === "1,2,3" : d.jobEvents[0].max_sequence >= 8);
     if (!valid) process.exit(1);
   ' "$boot" <<<"$evidence"
   if [ "$boot" -eq 1 ]; then
@@ -620,8 +674,15 @@ docker run --rm --entrypoint node -v "$object_volume:/data" "$image" --input-typ
   const evidence = JSON.parse(readFileSync("/data/recovery/boot1-job-evidence.json", "utf8"));
   const bytes = readFileSync("/data/recovery/assets/recovery-asset.mp4");
   const checksum = createHash("sha256").update(bytes).digest("hex");
-  if (checksum !== evidence.checksum || evidence.leaseOwner !== "worker-A" || evidence.eventMaxSequence !== 2) process.exit(1);
-  process.stdout.write(`durable_asset_checksum=${checksum} boot1_worker=worker-A event_max_sequence=2\n`);
+  if (checksum !== evidence.checksum || evidence.leaseOwner !== "worker-A" ||
+      evidence.eventMaxSequence !== 3 || evidence.eventSequences !== "1,2,3" ||
+      evidence.preClaim.jobStatus !== "queued" || evidence.preClaim.stepStatus !== "pending" ||
+      evidence.preClaim.jobAttemptCount !== 0 || evidence.preClaim.stepAttemptCount !== 0 ||
+      evidence.preClaim.jobLeaseOwner !== null || evidence.preClaim.stepLeaseOwner !== null ||
+      evidence.preClaim.eventSequences !== "1" ||
+      evidence.jobStatus !== "running" || evidence.stepStatus !== "running" ||
+      evidence.attemptCount !== 1 || evidence.stateOutbox !== 1) process.exit(1);
+  process.stdout.write(`durable_asset_checksum=${checksum} boot1_preclaim=queued/pending boot1_worker=worker-A event_sequences=1,2,3 state_outbox=1\n`);
 '
 
 docker run --rm --entrypoint node -v "$object_volume:/data" "$image" --input-type=module -e '

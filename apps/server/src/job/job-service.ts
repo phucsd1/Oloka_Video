@@ -11,6 +11,7 @@ import {
 } from "@oloka/contracts";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { TransactionRunner } from "../database/database.js";
+import type { AssetMaintenanceResult } from "../asset/asset-maintenance-service.js";
 import { AuditEventRepository } from "../database/repositories/audit-event-repository.js";
 import { IdempotencyRepository } from "../database/repositories/idempotency-repository.js";
 import { OutboxRepository } from "../database/repositories/outbox-repository.js";
@@ -20,6 +21,7 @@ import { sha256CanonicalJson } from "../kernel/canonical-json.js";
 import type { Clock } from "../kernel/clock.js";
 import type { IdGenerator } from "../kernel/id-generator.js";
 import type { JobRepository } from "./job-repository.js";
+import type { JobOperationsActivitySnapshot } from "./job-operations-activity.js";
 import type { JobRetryService } from "./job-retry-service.js";
 
 export interface JobServiceOptions {
@@ -34,19 +36,19 @@ export interface JobServiceOptions {
     capacity: number;
     stopping: boolean;
   };
+  activitySnapshot?: () => JobOperationsActivitySnapshot;
+  assetMaintenanceSnapshot?: () => AssetMaintenanceResult;
 }
 
 export class JobService {
   private readonly idempotency: IdempotencyRepository;
   private readonly audit: AuditEventRepository;
   private readonly outbox: OutboxRepository;
-  private readonly processStartedAt: number;
 
   constructor(private readonly options: JobServiceOptions) {
     this.idempotency = new IdempotencyRepository(options.idGenerator);
     this.audit = new AuditEventRepository(options.idGenerator);
     this.outbox = new OutboxRepository(options.idGenerator);
-    this.processStartedAt = options.clock.now();
   }
 
   list(actor: AuthenticatedSession, query: JobListQuery) {
@@ -524,15 +526,9 @@ export class JobService {
         .get() as { count: number };
       const reconciliation = database
         .prepare(
-          `SELECT
-             COUNT(*) AS durable,
-             SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS since_start
-           FROM audit_events WHERE action = 'job.reconcile.run'`,
+          "SELECT COUNT(*) AS durable FROM audit_events WHERE action = 'job.reconcile.run'",
         )
-        .get(this.processStartedAt) as {
-        durable: number;
-        since_start: number | null;
-      };
+        .get() as { durable: number };
       const requeued = database
         .prepare(
           "SELECT COUNT(*) AS count FROM job_events WHERE type = 'job.queued' AND payload_json LIKE '%requeued%'",
@@ -543,26 +539,45 @@ export class JobService {
         capacity: 1,
         stopping: false,
       };
+      const activity = this.options.activitySnapshot?.() ?? {
+        reconciliationRunsSinceProcessStart: 0,
+        requeuedExpiredWorkSinceProcessStart: 0,
+        cancellationCleanupSinceProcessStart: 0,
+        waitingProviderReconciliationsSinceProcessStart: 0,
+      };
+      const assetMaintenance = this.options.assetMaintenanceSnapshot?.() ?? {
+        expired: 0,
+        truncatedFileAhead: 0,
+        quarantinedDatabaseAhead: 0,
+        missingDurable: 0,
+        unreferencedDurable: 0,
+        unreferencedStaging: 0,
+        recoveredVerifying: 0,
+        failedVerifying: 0,
+      };
       const oldest = jobs.oldest ?? now;
       return operationsSnapshotSchema.parse({
         schemaVersion: 1,
-        queuedJobs: jobs.queued ?? 0,
-        oldestQueueAgeMs: Math.max(0, now - oldest),
-        activeLeases: jobs.active ?? 0,
-        expiredLeases: jobs.expired ?? 0,
-        retryScheduled: jobs.retries ?? 0,
-        cancelRequested: jobs.cancellations ?? 0,
-        outboxPending: outbox.pending ?? 0,
-        outboxDead: outbox.dead ?? 0,
-        outboxRedelivery: redelivery.count,
+        queuedJobsCurrent: jobs.queued ?? 0,
+        oldestQueueAgeMsCurrent: Math.max(0, now - oldest),
+        activeLeasesCurrent: jobs.active ?? 0,
+        expiredLeasesCurrent: jobs.expired ?? 0,
+        retryScheduledCurrent: jobs.retries ?? 0,
+        cancelRequestedCurrent: jobs.cancellations ?? 0,
+        waitingProviderCurrent: waitingProvider.count,
+        outboxPendingCurrent: outbox.pending ?? 0,
+        outboxDeadDurable: outbox.dead ?? 0,
+        outboxRedeliveryDurable: redelivery.count,
         reconciliationRunsDurable: reconciliation.durable,
-        reconciliationRunsSinceProcessStart: reconciliation.since_start ?? 0,
-        requeuedExpiredWork: requeued.count,
-        waitingProviderReconciliation: waitingProvider.count,
-        cancellationCleanup: jobs.cancellations ?? 0,
-        assetStorageDivergence: 0,
-        dispatcherActive: dispatcher.active,
-        dispatcherCapacity: dispatcher.capacity,
+        requeuedExpiredWorkDurable: requeued.count,
+        ...activity,
+        assetMaintenanceCurrent: assetMaintenance,
+        assetStorageDivergenceCurrent:
+          assetMaintenance.quarantinedDatabaseAhead +
+          assetMaintenance.missingDurable +
+          assetMaintenance.unreferencedDurable,
+        dispatcherActiveCurrent: dispatcher.active,
+        dispatcherCapacityCurrent: dispatcher.capacity,
       });
     });
   }

@@ -27,6 +27,7 @@ import { registerProjectRoutes } from "./project/project-routes.js";
 import { AssetService } from "./asset/asset-service.js";
 import { registerAssetRoutes } from "./asset/asset-routes.js";
 import { AssetMaintenanceService } from "./asset/asset-maintenance-service.js";
+import { AssetMaintenanceSnapshot } from "./asset/asset-maintenance-snapshot.js";
 import {
   BaselineQuotaPolicyResolver,
   DatabaseQuotaPolicyResolver,
@@ -39,6 +40,7 @@ import { JobService } from "./job/job-service.js";
 import { JobHandlerRegistry } from "./job/job-handler-registry.js";
 import { AssetIngestionJobHandler } from "./job/handlers/asset-ingestion-job-handler.js";
 import { DurableJobDispatcher } from "./job/durable-job-dispatcher.js";
+import { JobOperationsActivity } from "./job/job-operations-activity.js";
 import { registerJobRoutes } from "./job/job-routes.js";
 import {
   JobRetryPolicyRegistry,
@@ -93,6 +95,12 @@ export async function buildApplication(
       `Persistent storage startup check failed: ${initialStorageState.message ?? "unknown error"}`,
     );
   }
+  const assetMaintenance = new AssetMaintenanceService(
+    database.transactions,
+    storage,
+  );
+  const assetMaintenanceSnapshot = new AssetMaintenanceSnapshot();
+  assetMaintenanceSnapshot.update(await assetMaintenance.run(Date.now()));
 
   registerErrorHandler(app);
 
@@ -168,6 +176,7 @@ export async function buildApplication(
     publicOrigin: environment.identity?.publicOrigin,
   });
   const jobRepository = new JobRepository(idGenerator);
+  const jobOperationsActivity = new JobOperationsActivity();
   const jobDispatcher =
     jobAdmissionService === undefined
       ? undefined
@@ -187,6 +196,7 @@ export async function buildApplication(
           ]),
           clock,
           workerId: idGenerator.generate(),
+          activity: jobOperationsActivity,
         });
   if (jobAdmissionService !== undefined) {
     jobAdmissionService.reconcileProcessingAssets();
@@ -207,6 +217,8 @@ export async function buildApplication(
       ...(jobDispatcher === undefined
         ? {}
         : { dispatcherSnapshot: () => jobDispatcher.snapshot() }),
+      activitySnapshot: () => jobOperationsActivity.snapshot(),
+      assetMaintenanceSnapshot: () => assetMaintenanceSnapshot.current(),
     });
     registerJobRoutes({
       app,
@@ -226,14 +238,10 @@ export async function buildApplication(
       publicOrigin: environment.identity?.publicOrigin,
     });
   }
-  const assetMaintenance = new AssetMaintenanceService(
-    database.transactions,
-    storage,
-  );
-  await assetMaintenance.run(Date.now());
   const assetMaintenanceInterval = setInterval(() => {
     void assetMaintenance.run(Date.now()).then(
       (result) => {
+        assetMaintenanceSnapshot.update(result);
         if (
           result.quarantinedDatabaseAhead > 0 ||
           result.missingDurable > 0 ||

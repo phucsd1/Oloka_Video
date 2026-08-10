@@ -1,6 +1,7 @@
 import type { TransactionRunner } from "../database/database.js";
 import type { Clock } from "../kernel/clock.js";
 import type { JobHandlerRegistry } from "./job-handler-registry.js";
+import type { JobOperationsActivity } from "./job-operations-activity.js";
 import type { JobRepository } from "./job-repository.js";
 
 export const DEFAULT_DISPATCHER_OPTIONS = {
@@ -26,6 +27,7 @@ export interface DurableJobDispatcherOptions {
   heartbeatIntervalMs?: number;
   shutdownGraceMs?: number;
   random?: () => number;
+  activity?: JobOperationsActivity;
 }
 
 export class DurableJobDispatcher {
@@ -105,6 +107,7 @@ export class DurableJobDispatcher {
             now: this.options.clock.now(),
           }),
         );
+        this.options.activity?.recordCancellationCleanup();
       } finally {
         this.active -= 1;
       }
@@ -164,9 +167,10 @@ export class DurableJobDispatcher {
 
   reconcileOnce(): void {
     if (this.stopping) return;
-    this.options.transactions.run("immediate", (context) =>
+    const result = this.options.transactions.run("immediate", (context) =>
       this.options.repository.reconcile(context, this.options.clock.now()),
     );
+    this.options.activity?.recordReconciliation(result);
   }
 
   snapshot(): { active: number; capacity: number; stopping: boolean } {

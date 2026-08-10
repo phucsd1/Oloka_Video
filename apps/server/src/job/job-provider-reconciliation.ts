@@ -4,6 +4,7 @@ import type {
   ClaimedProviderReconciliation,
   JobRepository,
 } from "./job-repository.js";
+import type { JobOperationsActivity } from "./job-operations-activity.js";
 
 export interface ProviderReconciliationAdapter {
   poll(operationId: string): Promise<{ status: "pending" }>;
@@ -23,6 +24,7 @@ export interface ProviderReconciliationServiceOptions {
   workerId: string;
   leaseDurationMs: number;
   adapter: ProviderReconciliationAdapter;
+  activity?: JobOperationsActivity;
 }
 
 export class ProviderReconciliationService {
@@ -68,6 +70,7 @@ export class ProviderReconciliationService {
         now: this.options.clock.now(),
       }),
     );
+    this.options.activity?.recordWaitingProviderReconciliation();
     return true;
   }
 }

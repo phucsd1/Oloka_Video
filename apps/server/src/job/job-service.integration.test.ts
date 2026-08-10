@@ -93,8 +93,8 @@ describe("JobService", () => {
       ).toEqual({ replayed: false });
       expect(service.operations(admin)).toMatchObject({
         schemaVersion: 1,
-        cancelRequested: 1,
-        dispatcherCapacity: 2,
+        cancelRequestedCurrent: 1,
+        dispatcherCapacityCurrent: 2,
       });
       expect(
         database.transactions.run("read", ({ database: connection }) =>

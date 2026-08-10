@@ -500,23 +500,40 @@ export const adminJobDiagnosticsSchema = z
 export const operationsSnapshotSchema = z
   .object({
     schemaVersion: z.literal(1),
-    queuedJobs: z.number().int().nonnegative(),
-    oldestQueueAgeMs: z.number().int().nonnegative(),
-    activeLeases: z.number().int().nonnegative(),
-    expiredLeases: z.number().int().nonnegative(),
-    retryScheduled: z.number().int().nonnegative(),
-    cancelRequested: z.number().int().nonnegative(),
-    outboxPending: z.number().int().nonnegative(),
-    outboxDead: z.number().int().nonnegative(),
-    outboxRedelivery: z.number().int().nonnegative(),
+    queuedJobsCurrent: z.number().int().nonnegative(),
+    oldestQueueAgeMsCurrent: z.number().int().nonnegative(),
+    activeLeasesCurrent: z.number().int().nonnegative(),
+    expiredLeasesCurrent: z.number().int().nonnegative(),
+    retryScheduledCurrent: z.number().int().nonnegative(),
+    cancelRequestedCurrent: z.number().int().nonnegative(),
+    waitingProviderCurrent: z.number().int().nonnegative(),
+    outboxPendingCurrent: z.number().int().nonnegative(),
+    outboxDeadDurable: z.number().int().nonnegative(),
+    outboxRedeliveryDurable: z.number().int().nonnegative(),
     reconciliationRunsDurable: z.number().int().nonnegative(),
+    requeuedExpiredWorkDurable: z.number().int().nonnegative(),
     reconciliationRunsSinceProcessStart: z.number().int().nonnegative(),
-    requeuedExpiredWork: z.number().int().nonnegative(),
-    waitingProviderReconciliation: z.number().int().nonnegative(),
-    cancellationCleanup: z.number().int().nonnegative(),
-    assetStorageDivergence: z.number().int().nonnegative(),
-    dispatcherActive: z.number().int().nonnegative(),
-    dispatcherCapacity: z.number().int().positive(),
+    requeuedExpiredWorkSinceProcessStart: z.number().int().nonnegative(),
+    cancellationCleanupSinceProcessStart: z.number().int().nonnegative(),
+    waitingProviderReconciliationsSinceProcessStart: z
+      .number()
+      .int()
+      .nonnegative(),
+    assetMaintenanceCurrent: z
+      .object({
+        expired: z.number().int().nonnegative(),
+        truncatedFileAhead: z.number().int().nonnegative(),
+        quarantinedDatabaseAhead: z.number().int().nonnegative(),
+        missingDurable: z.number().int().nonnegative(),
+        unreferencedDurable: z.number().int().nonnegative(),
+        unreferencedStaging: z.number().int().nonnegative(),
+        recoveredVerifying: z.number().int().nonnegative(),
+        failedVerifying: z.number().int().nonnegative(),
+      })
+      .strict(),
+    assetStorageDivergenceCurrent: z.number().int().nonnegative(),
+    dispatcherActiveCurrent: z.number().int().nonnegative(),
+    dispatcherCapacityCurrent: z.number().int().positive(),
   })
   .strict();
 
