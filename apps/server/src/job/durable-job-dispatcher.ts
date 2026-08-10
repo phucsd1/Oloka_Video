@@ -43,6 +43,8 @@ export class DurableJobDispatcher {
   private reconcileTimer: NodeJS.Timeout | undefined;
   private readonly heartbeatTimers = new Set<NodeJS.Timeout>();
   private stopping = false;
+  private ticking = false;
+  private wakeRequested = false;
   private active = 0;
 
   constructor(private readonly options: DurableJobDispatcherOptions) {
@@ -65,7 +67,7 @@ export class DurableJobDispatcher {
 
   start(): void {
     if (this.timer !== undefined || this.stopping) return;
-    this.schedule(0);
+    this.wake();
     this.reconcileTimer = setInterval(() => {
       this.reconcileOnce();
     }, this.reconcileIntervalMs);
@@ -74,6 +76,7 @@ export class DurableJobDispatcher {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.wakeRequested = false;
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
     if (this.reconcileTimer !== undefined) clearInterval(this.reconcileTimer);
@@ -165,6 +168,16 @@ export class DurableJobDispatcher {
     return true;
   }
 
+  wake(): void {
+    if (this.stopping) return;
+    if (this.ticking) {
+      this.wakeRequested = true;
+      return;
+    }
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.schedule(0);
+  }
+
   reconcileOnce(): void {
     if (this.stopping) return;
     const result = this.options.transactions.run("immediate", (context) =>
@@ -190,13 +203,17 @@ export class DurableJobDispatcher {
   }
 
   private async tick(): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopping || this.ticking) return;
+    this.ticking = true;
     try {
       await this.runOnce();
     } finally {
+      this.ticking = false;
       if (!this.stopping) {
+        const wakeRequested = this.wakeRequested;
+        this.wakeRequested = false;
         const jitter = Math.floor(this.random() * (this.jitterMaxMs + 1));
-        this.schedule(this.pollIntervalMs + jitter);
+        this.schedule(wakeRequested ? 0 : this.pollIntervalMs + jitter);
       }
     }
   }

@@ -1,6 +1,6 @@
 # Quota and Concurrency Model
 
-Status: database-backed policy composition and canonical upload reservations are implemented in migration v6 for Phase 3E review. These tables did not exist in production migration v4.
+Status: database-backed policy composition and canonical upload reservations are live in production migration v6 from the Phase 3E core cutover. Phase 3E.3 does not change quota schema or semantics, and Phase 3F has not started.
 
 ## Default MVP limits
 

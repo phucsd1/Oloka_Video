@@ -1,12 +1,12 @@
 # Database Migration Strategy
 
-Status: normative; migrations v1-v5 are immutable production history. Migration v6 is implemented on the Phase 3E review branch and is not applied in production.
+Status: normative; migrations v1-v6 are immutable production history. Schema-v6 Phase 3E core reached production at merge `f6761312ea30f9cc76503447be84e37b758d05f5`; Phase 3E.3 changes runtime wiring only and creates no v7 migration.
 
 ## Contract
 
 Migrations are numbered, named, immutable, forward-only SQL assets executed before the HTTP listener starts. The runner records version, name, SHA-256 checksum, applied time, execution duration, and application build SHA in `schema_migrations`. It refuses startup on a checksum/name mismatch, gap, duplicate version, failed migration, or database schema newer than the application.
 
-Production remains schema version 5. Phase 3E advances an approved review database to schema version 6 through `0006-durable-job-kernel.sql` without altering a byte of v1-v5. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
+Production remains schema version 6. Phase 3E advanced production through `0006-durable-job-kernel.sql` without altering a byte of v1-v5, and v1-v6 are now immutable. Services must never infer schema, execute opportunistic `ALTER TABLE`, or edit an applied migration.
 
 ## Ledger compatibility
 

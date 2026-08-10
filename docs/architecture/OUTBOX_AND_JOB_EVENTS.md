@@ -1,10 +1,22 @@
 # Outbox and Job Events
 
-Status: Phase 3E reuses the v2 outbox and adds append-only, strictly sequenced Job events in migration v6; production cutover is pending.
+Status: schema-v6 Phase 3E core reached production at merge `f6761312ea30f9cc76503447be84e37b758d05f5`. Phase 3E.3 closes the transactional-outbox runtime wiring gap; that correction is not deployed until its later cutover verification. Phase 3F has not started.
 
 ## Outbox contract
 
 Every durable mutation that requires later work creates an `outbox_events` row in the same SQLite transaction. Topics cover dispatcher wakeups, domain-event/audit side effects, provider submission intent, cleanup, reconciliation, and SSE-visible event production where not directly inserted.
+
+The production-emittable Phase 3E set is intentionally limited:
+
+| Topic                     | Current role                | Handler effect                                                                       |
+| ------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
+| `job.dispatch.requested`  | dispatcher wake             | asks the canonical `DurableJobDispatcher` to poll immediately; never claims directly |
+| `job.state.changed`       | job-state notification      | intentional local acknowledgement; durable Job state and `job_events` are unchanged  |
+| `job.reconcile.requested` | admin reconciliation intent | invokes the canonical bounded dispatcher reconciler                                  |
+
+The application starts one `OutboxConsumer` after database and Job services are ready, performs one immediate bounded pass, then polls every 250 ms. Each pass claims at most 25 rows with concurrency 4, a 30-second lease, five attempts, and bounded exponential retry capped at 60 seconds. Passes never overlap, the idle timer is unreferenced, and shutdown finishes already claimed rows before SQLite closes. Unknown topics fail closed as `OUTBOX_HANDLER_MISSING` rather than using a catch-all handler.
+
+Provider-intent topic design remains architecture scaffolding only. No provider topic is emitted or registered by the enabled Phase 3E production path, and this correction enables no provider adapter or network publication.
 
 Delivery is at least once. Consumers must use the outbox ID or semantic aggregate key as an idempotency key. Exactly-once delivery is not claimed. A consumer claims with a lease, performs its bounded effect outside the claim transaction, then marks published with a guarded update. Retry uses typed backoff; exhausted events become `dead` and page an operator rather than disappearing.
 

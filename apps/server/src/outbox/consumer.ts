@@ -32,6 +32,7 @@ export class OutboxHandlerRegistry {
 
 export class OutboxConsumer {
   private stopping = false;
+  private inFlight: Promise<number> | undefined;
 
   constructor(
     private readonly transactions: TransactionRunner,
@@ -45,7 +46,22 @@ export class OutboxConsumer {
     }
   }
 
-  async runOnce(): Promise<number> {
+  runOnce(): Promise<number> {
+    if (this.inFlight !== undefined) return this.inFlight;
+    const inFlight = this.runPass();
+    this.inFlight = inFlight;
+    void inFlight.then(
+      () => {
+        if (this.inFlight === inFlight) this.inFlight = undefined;
+      },
+      () => {
+        if (this.inFlight === inFlight) this.inFlight = undefined;
+      },
+    );
+    return inFlight;
+  }
+
+  private async runPass(): Promise<number> {
     if (this.stopping) return 0;
     const now = this.clock.now();
     const events = this.transactions.run("immediate", (context) => {
@@ -62,7 +78,6 @@ export class OutboxConsumer {
       offset < events.length;
       offset += this.options.concurrency
     ) {
-      if (this.stopping) break;
       await Promise.all(
         events
           .slice(offset, offset + this.options.concurrency)

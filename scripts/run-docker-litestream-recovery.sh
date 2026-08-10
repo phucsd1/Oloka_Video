@@ -477,6 +477,21 @@ seed_asset_job_state() {
           claimedState.eventSequences !== "1,2,3" || claimedState.stateOutbox !== 1) {
         throw new Error("canonical worker-A claim evidence invalid");
       }
+      canonical.transactions.run("immediate", ({ database }) =>
+        database.prepare(`INSERT INTO outbox_events
+          (id, topic, aggregate_type, aggregate_id, payload_json, status,
+           available_at, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            "00000000-0000-4000-8000-000000000205",
+            "job.state.changed",
+            "job",
+            jobId,
+            JSON.stringify({ schemaVersion: 1, jobId, status: "running" }),
+            "pending",
+            Date.now() + 60_000,
+            Date.now(),
+          ),
+      );
     } finally {
       await canonical.close();
     }
@@ -490,6 +505,45 @@ seed_asset_job_state() {
       eventMaxSequence: 3, stateOutbox: claimedState.stateOutbox,
     }), { flag: "w" });
   '
+}
+
+release_recovered_outbox_backlog() {
+  local container="$1"
+  docker exec "$container" node --input-type=module -e '
+    import { DatabaseSync } from "node:sqlite";
+    const database = new DatabaseSync("/var/lib/oloka/database/oloka.db");
+    const id = "00000000-0000-4000-8000-000000000205";
+    const restored = database.prepare(
+      "SELECT status, attempt_count FROM outbox_events WHERE id = ?",
+    ).get(id);
+    if (!restored || restored.status !== "pending" || restored.attempt_count !== 0) {
+      throw new Error("Boot 2 did not restore the pending outbox backlog");
+    }
+    database.prepare("UPDATE outbox_events SET available_at = 0 WHERE id = ?").run(id);
+    database.close();
+    process.stdout.write("restored_outbox_backlog=pending released_for_runtime=pass\n");
+  '
+}
+
+wait_for_recovered_outbox_backlog() {
+  local container="$1"
+  for _ in $(seq 1 30); do
+    if docker exec "$container" node --input-type=module -e '
+      import { DatabaseSync } from "node:sqlite";
+      const database = new DatabaseSync("/var/lib/oloka/database/oloka.db", { readOnly: true });
+      const row = database.prepare(
+        "SELECT status, attempt_count FROM outbox_events WHERE id = ?",
+      ).get("00000000-0000-4000-8000-000000000205");
+      database.close();
+      if (!row || row.status !== "published" || row.attempt_count !== 1) process.exit(1);
+    '; then
+      echo "restored_outbox_backlog=published attempt_count=1"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Recovered outbox backlog was not published by the application runtime" >&2
+  return 1
 }
 
 recover_asset_job_boot2() {
@@ -555,8 +609,9 @@ inspect_database() {
       const jobs = db.prepare("SELECT id, type, status, owner_user_id, progress_basis_points, attempt_count, lease_owner, lease_expires_at, version FROM jobs ORDER BY id").all();
       const steps = db.prepare("SELECT id, job_id, status, attempt_count, lease_owner, lease_expires_at, version FROM job_steps ORDER BY id").all();
       const jobEvents = db.prepare("SELECT job_id, MAX(sequence) AS max_sequence, GROUP_CONCAT(sequence, char(44)) AS sequences FROM job_events GROUP BY job_id").all();
+      const outboxBacklog = db.prepare("SELECT status, attempt_count, last_error_code FROM outbox_events WHERE id = ?").get("00000000-0000-4000-8000-000000000205");
       db.close();
-      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, users, identities, sessions, projects, assets, jobs, steps, jobEvents, metadataVersion: metadata.version, witness: JSON.parse(metadata.value_json) }));
+      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, users, identities, sessions, projects, assets, jobs, steps, jobEvents, outboxBacklog, metadataVersion: metadata.version, witness: JSON.parse(metadata.value_json) }));
     '
 }
 
@@ -614,7 +669,7 @@ for boot in 1 2 3; do
   restore_duration=$((restore_finished_at - restore_started_at))
   if [ "$restore_duration" -gt 120 ]; then echo "restore exceeded 120 seconds" >&2; exit 1; fi
   if [ "$boot" -eq 1 ]; then seed_identity_state "$container"; create_project_state "$container"; seed_asset_job_state "$container"; fi
-  if [ "$boot" -eq 2 ]; then transition_member_state "$container"; soft_delete_project "$container"; recover_asset_job_boot2 "$container"; fi
+  if [ "$boot" -eq 2 ]; then release_recovered_outbox_backlog "$container"; transition_member_state "$container"; soft_delete_project "$container"; recover_asset_job_boot2 "$container"; wait_for_recovered_outbox_backlog "$container"; fi
   if [ "$boot" -eq 3 ]; then restore_project "$container"; fi
   wait_for_replica
   boot_replica_objects="$(mc "ls --recursive ci/$bucket/$prefix | wc -l" | tr -d '[:space:]')"
@@ -649,6 +704,8 @@ for boot in 1 2 3; do
       d.assets[0].byte_checksum_sha256 && d.assets[0].lifecycle_status === "active" &&
       d.jobs.length === 1 && d.jobs[0].id === "00000000-0000-4000-8000-000000000202" &&
       d.steps.length === 1 && d.steps[0].id === "00000000-0000-4000-8000-000000000203" &&
+      (boot === 1 ? d.outboxBacklog.status === "pending" && d.outboxBacklog.attempt_count === 0 :
+        d.outboxBacklog.status === "published" && d.outboxBacklog.attempt_count === 1 && d.outboxBacklog.last_error_code === null) &&
       (boot === 1 ? d.jobs[0].status === "running" && d.jobs[0].attempt_count === 1 && d.jobs[0].lease_owner === "worker-A" && d.assets[0].ingestion_status === "processing" :
         d.jobs[0].status === "completed" && d.jobs[0].progress_basis_points === 10000 && d.jobs[0].attempt_count === 2 && d.steps[0].status === "completed" && d.assets[0].ingestion_status === "ready") &&
       (boot === 1 ? d.jobEvents[0].sequences === "1,2,3" : d.jobEvents[0].max_sequence >= 8);
@@ -663,7 +720,7 @@ for boot in 1 2 3; do
   fi
   if [ "$boot" -eq 2 ]; then terminal_event_sequences="$current_job_sequences"; fi
   if [ "$boot" -eq 3 ]; then test "$current_job_sequences" = "$terminal_event_sequences"; fi
-  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4,5,6 project_persistence=pass identity_persistence=pass job_persistence=pass event_sequences=$current_job_sequences replica_objects=$boot_replica_objects restore_seconds=$restore_duration restore_bound_seconds=120 quick_check=ok foreign_keys=0"
+  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4,5,6 project_persistence=pass identity_persistence=pass job_persistence=pass outbox_backlog_status=$(docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(d.outboxBacklog.status)' <<<"$evidence") event_sequences=$current_job_sequences replica_objects=$boot_replica_objects restore_seconds=$restore_duration restore_bound_seconds=120 quick_check=ok foreign_keys=0"
   docker rm "$container" >/dev/null
   docker volume rm "$local_volume" >/dev/null
 done

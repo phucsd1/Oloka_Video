@@ -1,10 +1,10 @@
 # Phase 3E Durable Job Kernel
 
-Status: implementation in review; production cutover pending.
+Status: schema-v6 core production cutover completed at merge `f6761312ea30f9cc76503447be84e37b758d05f5`. Phase 3E.3 closes the transactional-outbox runtime wiring gap; the correction itself is not deployed until its later cutover verification. Phase 3F has not started.
 
 ## Boundary
 
-Phase 3E introduces schema v6, the provider-independent durable Job kernel, quota policy/reservation persistence, the single in-process dispatcher, owner history/SSE surfaces, redacted admin diagnostics, and minimal persisted-progress UI. Production remains schema v5 until a separate approved cutover.
+Phase 3E introduced production schema v6, the provider-independent durable Job kernel, quota policy/reservation persistence, the single in-process dispatcher, owner history/SSE surfaces, redacted admin diagnostics, and minimal persisted-progress UI. The Phase 3E.3 correction starts the existing outbox consumer in that same application process without changing schema.
 
 The only production-enabled handler is `asset_ingestion`. Generation, render, purge, LLM, TTS, transcription, Modal, Composition, preview, and RenderOutput behavior are not enabled or created by this slice. Phase 3F has not started.
 

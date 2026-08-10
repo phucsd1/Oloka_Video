@@ -1,6 +1,6 @@
 # Durable Dispatcher V1
 
-Status: Phase 3E implementation in review. Asset ingestion is the only enabled handler; production cutover is pending.
+Status: schema-v6 Phase 3E core reached production at merge `f6761312ea30f9cc76503447be84e37b758d05f5`. Asset ingestion remains the only enabled handler. Phase 3E.3 wires the existing transactional outbox to this dispatcher, but that correction is not deployed until its later cutover verification. Phase 3F has not started.
 
 ## Runtime model
 

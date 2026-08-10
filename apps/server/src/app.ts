@@ -46,6 +46,10 @@ import {
   JobRetryPolicyRegistry,
   JobRetryService,
 } from "./job/job-retry-service.js";
+import { OutboxRepository } from "./database/repositories/outbox-repository.js";
+import { OutboxConsumer } from "./outbox/consumer.js";
+import { OutboxRuntime } from "./outbox/runtime.js";
+import { createPhase3EOutboxHandlerRegistry } from "./outbox/phase3e-handlers.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -198,9 +202,43 @@ export async function buildApplication(
           workerId: idGenerator.generate(),
           activity: jobOperationsActivity,
         });
+  const outboxRuntime =
+    jobDispatcher === undefined
+      ? undefined
+      : new OutboxRuntime(
+          new OutboxConsumer(
+            database.transactions,
+            new OutboxRepository(idGenerator),
+            createPhase3EOutboxHandlerRegistry({ dispatcher: jobDispatcher }),
+            clock,
+            {
+              leaseOwner: idGenerator.generate(),
+              batchSize: 25,
+              concurrency: 4,
+              leaseDurationMs: 30_000,
+              maxAttempts: 5,
+              retryDelayMs: (attempt) =>
+                Math.min(60_000, 1_000 * 2 ** Math.max(0, attempt - 1)),
+            },
+          ),
+          {
+            pollIntervalMs: 250,
+            onError: (error) => {
+              app.log.error(
+                {
+                  event: "outbox.runtime.failed",
+                  errorType:
+                    error instanceof Error ? error.name : "UnknownError",
+                },
+                "Outbox runtime pass failed",
+              );
+            },
+          },
+        );
   if (jobAdmissionService !== undefined) {
     jobAdmissionService.reconcileProcessingAssets();
     jobDispatcher?.start();
+    await outboxRuntime?.start();
     const jobService = new JobService({
       transactions: database.transactions,
       clock,
@@ -304,6 +342,7 @@ export async function buildApplication(
   app.addHook("onClose", async () => {
     clearInterval(identityMaintenanceInterval);
     clearInterval(assetMaintenanceInterval);
+    await outboxRuntime?.stop();
     await jobDispatcher?.stop();
     await Promise.all([storage.close(), database.close()]);
   });

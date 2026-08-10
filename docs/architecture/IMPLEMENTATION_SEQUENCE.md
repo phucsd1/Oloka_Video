@@ -1,6 +1,6 @@
 # Phase 3 Implementation Sequence
 
-Status: Slice 3A.1, Slice 3B, Slice 3C, and Slice 3D production cutovers are closed. Phase 3E is the current local implementation slice; later provider/render slices require explicit authorization.
+Status: Slice 3A.1 through the schema-v6 Phase 3E core production cutover are closed. Phase 3E.3 is the current transactional-outbox runtime correction and is not yet deployed; Phase 3F and later provider/render slices require explicit authorization.
 
 ## 3A — Persistence kernel
 
@@ -84,7 +84,7 @@ restart private Asset durability were verified before Phase 3E.
 
 ## 3E — Durable Job kernel
 
-Implementation status: implemented on `codex/phase3e-durable-job-kernel` and in review. Production cutover, migration v6 production execution, and deployment smoke remain pending.
+Implementation status: schema-v6 core production cutover completed at merge `f6761312ea30f9cc76503447be84e37b758d05f5`. Phase 3E.3 closes the transactional-outbox runtime wiring gap without a migration; that correction remains undeployed pending its own audited cutover.
 
 - Modules/files: Job/JobStep/Event repositories, dispatcher pools, lease/heartbeat/reconciler, quota admission, outbox consumers, cancellation/retry, SSE/history/polling and operations metrics.
 - Schema/migration: v6 generic jobs, steps, events, explicit current-step and
@@ -92,7 +92,7 @@ Implementation status: implemented on `codex/phase3e-durable-job-kernel` and in 
   submission-intent fields, and remaining quota/outbox indexes; no composition
   FK or render-only lineage yet.
 - Test gate: exact state machines, two-claimant/version races, expired leases, process death at every boundary, parent/item identity, idempotency conflict, outbox at-least-once, SSE Last-Event-ID replay, cancellation/retry and real progress.
-- Deployment smoke (pending cutover authorization): accepted synthetic non-provider Job survives restart, is reconciled, replays SSE, rejects stale worker results, and exposes queue/lease metrics.
+- Deployment smoke: the core cutover proved a synthetic non-provider Job survives restart, is reconciled, replays SSE, rejects stale worker results, and exposes queue/lease metrics. Phase 3E.3 requires a later cutover to verify normal outbox backlog draining in production.
 - Rollback: stop new claims, let leases expire, deploy compatible worker or forward fix; admitted Jobs/events are never deleted or inferred from logs/files.
 - Explicitly excluded: actual LLM/TTS/transcription/Modal calls, composition, preview, render outputs.
 - Exit criteria: provider-independent AC-JOB, AC-QUOTA, AC-OBS and restart/recovery gates pass.
