@@ -137,7 +137,7 @@ stop_boot() {
   echo "boot_container=$container shutdown_seconds=$elapsed secret_scan=pass"
 }
 
-prepare_v5_database() {
+prepare_v6_database() {
   local local_volume="$1"
   docker run --rm --entrypoint node \
     -v "$local_volume:/var/lib/oloka" "$image" --input-type=module -e '
@@ -152,6 +152,7 @@ prepare_v5_database() {
       const v3 = readFileSync("/app/apps/server/migrations/0003-identity-and-approval.sql");
       const v4 = readFileSync("/app/apps/server/migrations/0004-canonical-project.sql");
       const v5 = readFileSync("/app/apps/server/migrations/0005-private-assets.sql");
+      const v6 = readFileSync("/app/apps/server/migrations/0006-durable-job-kernel.sql");
       database.exec(v1.toString("utf8"));
       database.exec(v2.toString("utf8"));
       database.prepare(`INSERT INTO schema_migrations
@@ -184,6 +185,14 @@ prepare_v5_database() {
           "private-assets",
           createHash("sha256").update(v5).digest("hex"),
           "slice-3d-docker-fixture",
+        );
+      database.exec(v6.toString("utf8"));
+      database.prepare(`INSERT INTO schema_migrations
+        (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+        VALUES (6, ?, ?, 6, 0, ?)`).run(
+          "durable-job-kernel",
+          createHash("sha256").update(v6).digest("hex"),
+          "slice-3e-docker-fixture",
         );
       database.close();
     '
@@ -345,6 +354,48 @@ create_project_state() {
     } finally {
       await database.close();
     }
+  '
+}
+
+seed_composition_preview_state() {
+  local container="$1"
+  docker exec "$container" node --input-type=module -e '
+    import { randomUUID } from "node:crypto";
+    import { pathToFileURL } from "node:url";
+    import { SqliteSystemDatabase } from "/app/apps/server/dist/database/sqlite-system-database.js";
+    import { CompositionService } from "/app/apps/server/dist/composition/composition-service.js";
+    import { BaselineQuotaPolicyResolver } from "/app/apps/server/dist/quota/quota-policy.js";
+    import { FilesystemObjectStorage } from "/app/apps/server/dist/storage/filesystem-object-storage.js";
+    import { decodeApplicationKey } from "/app/apps/server/dist/kernel/app-key.js";
+    const database = await SqliteSystemDatabase.connect(pathToFileURL("/var/lib/oloka/database/oloka.db").href);
+    const storage = new FilesystemObjectStorage("/data");
+    try {
+      const project = database.transactions.run("read", ({ database }) => database.prepare("SELECT id, version FROM projects WHERE status = ? ORDER BY id LIMIT 1").get("active"));
+      if (!project) process.exit(1);
+      const actor = { sessionId: "00000000-0000-4000-8000-000000000121", user: { id: "00000000-0000-4000-8000-000000000101", email: "admin@oloka-recovery.example", displayName: "Recovery Admin", avatarUrl: null, role: "admin", status: "active", version: 1 } };
+      const service = new CompositionService({ transactions: database.transactions, storage, applicationKey: decodeApplicationKey(process.env.OLOKA_APP_KEY), clock: { now: () => Date.now() }, idGenerator: { generate: () => randomUUID() }, quotaPolicyResolver: new BaselineQuotaPolicyResolver() });
+      const document = {
+        schemaVersion: 1,
+        compositionId: "10000000-0000-4000-8000-000000000301",
+        name: "Recovery composition",
+        aspectRatio: "16:9",
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        durationMs: 4000,
+        background: "#102030",
+        scenes: [{ id: "20000000-0000-4000-8000-000000000301", order: 0, startMs: 0, durationMs: 4000, text: "Recovery preview tiếng Việt", narration: null, assetReferences: [], style: { layout: "center", foreground: "#ffffff", accent: "#ffd23f", paddingPercent: 8, gapPercent: 4 }, tracks: [] }],
+        voiceConfig: null,
+        captionConfig: { enabled: true, preset: "Clean", fontToken: "oloka-sans-v1", safeMarginPercent: 8, maxLines: 2 },
+        bgmConfig: null,
+        manifests: { dependency: { schemaVersion: 1, hashSha256: "0".repeat(64) }, asset: { schemaVersion: 1, hashSha256: "0".repeat(64) }, font: { schemaVersion: 1, hashSha256: "0".repeat(64) }, caption: { schemaVersion: 1, hashSha256: "0".repeat(64) } },
+        runtimeVersions: { materializer: "client", renderer: "client", renderProtocol: 1, hyperframes: "0.7.104", hyperframesRuntimeSha256: "0".repeat(64), templateRegistry: "client" },
+        metadata: { locale: "vi-VN", title: "Recovery composition", safeAreaMode: "action" },
+      };
+      const created = service.create(actor, project.id, { document, expectedProjectVersion: project.version }, "docker-recovery-composition-create");
+      const preview = await service.requestPreview(actor, created.composition.id, "docker-recovery-preview");
+      database.transactions.run("immediate", ({ database }) => database.prepare("INSERT OR REPLACE INTO system_metadata (key, value_json, updated_at, version) VALUES (?, ?, ?, COALESCE((SELECT version FROM system_metadata WHERE key = ?), 0) + 1)").run("recovery.composition.evidence", JSON.stringify({ compositionId: created.composition.id, previewId: preview.preview.id, fingerprint: preview.preview.renderContractFingerprintSha256, byteChecksum: preview.preview.byteChecksumSha256 }), 1700000000000, "recovery.composition.evidence"));
+    } finally { await storage.close(); await database.close(); }
   '
 }
 
@@ -605,13 +656,17 @@ inspect_database() {
       const identities = db.prepare("SELECT id, user_id, issuer, email_verified FROM oauth_identities ORDER BY id").all();
       const sessions = db.prepare("SELECT id, user_id, status, revoke_reason FROM sessions ORDER BY id").all();
       const projects = db.prepare("SELECT id, owner_user_id, name, favorite, status, version, deleted_at, purge_after FROM projects ORDER BY id").all();
+      const compositions = db.prepare("SELECT id, project_id, version_number, canonical_hash_sha256, status FROM composition_versions ORDER BY id").all();
+      const compositionRefs = db.prepare("SELECT composition_version_id, asset_id, usage FROM composition_asset_references ORDER BY composition_version_id, asset_id, usage").all();
+      const previews = db.prepare("SELECT id, composition_version_id, render_contract_fingerprint_sha256, byte_checksum_sha256, status FROM preview_artifacts ORDER BY id").all();
       const assets = db.prepare("SELECT id, project_id, owner_user_id, byte_size, byte_checksum_sha256, ingestion_status, lifecycle_status FROM assets ORDER BY id").all();
       const jobs = db.prepare("SELECT id, type, status, owner_user_id, progress_basis_points, attempt_count, lease_owner, lease_expires_at, version FROM jobs ORDER BY id").all();
       const steps = db.prepare("SELECT id, job_id, status, attempt_count, lease_owner, lease_expires_at, version FROM job_steps ORDER BY id").all();
       const jobEvents = db.prepare("SELECT job_id, MAX(sequence) AS max_sequence, GROUP_CONCAT(sequence, char(44)) AS sequences FROM job_events GROUP BY job_id").all();
       const outboxBacklog = db.prepare("SELECT status, attempt_count, last_error_code FROM outbox_events WHERE id = ?").get("00000000-0000-4000-8000-000000000205");
+      const compositionEvidence = db.prepare("SELECT value_json, version FROM system_metadata WHERE key = ?").get("recovery.composition.evidence");
       db.close();
-      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, users, identities, sessions, projects, assets, jobs, steps, jobEvents, outboxBacklog, metadataVersion: metadata.version, witness: JSON.parse(metadata.value_json) }));
+      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, users, identities, sessions, projects, compositions, compositionRefs, previews, assets, jobs, steps, jobEvents, outboxBacklog, metadataVersion: metadata.version, compositionEvidenceVersion: compositionEvidence?.version ?? null, compositionEvidence: compositionEvidence ? JSON.parse(compositionEvidence.value_json) : null, witness: JSON.parse(metadata.value_json) }));
     '
 }
 
@@ -662,13 +717,13 @@ for boot in 1 2 3; do
   docker volume create "$local_volume" >/dev/null
   mode="restore-required"
   if [ "$boot" -eq 1 ]; then mode="fresh-if-replica-missing"; fi
-  if [ "$boot" -eq 1 ]; then prepare_v5_database "$local_volume"; fi
+  if [ "$boot" -eq 1 ]; then prepare_v6_database "$local_volume"; fi
   restore_started_at="$(date +%s)"
   container="$(start_boot "$boot" "$mode" "$local_volume")"
   restore_finished_at="$(date +%s)"
   restore_duration=$((restore_finished_at - restore_started_at))
   if [ "$restore_duration" -gt 120 ]; then echo "restore exceeded 120 seconds" >&2; exit 1; fi
-  if [ "$boot" -eq 1 ]; then seed_identity_state "$container"; create_project_state "$container"; seed_asset_job_state "$container"; fi
+  if [ "$boot" -eq 1 ]; then seed_identity_state "$container"; create_project_state "$container"; seed_composition_preview_state "$container"; seed_asset_job_state "$container"; fi
   if [ "$boot" -eq 2 ]; then release_recovered_outbox_backlog "$container"; transition_member_state "$container"; soft_delete_project "$container"; recover_asset_job_boot2 "$container"; wait_for_recovered_outbox_backlog "$container"; fi
   if [ "$boot" -eq 3 ]; then restore_project "$container"; fi
   wait_for_replica
@@ -684,12 +739,12 @@ for boot in 1 2 3; do
   docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e '
     const d=JSON.parse(require("fs").readFileSync(0,"utf8"));
     const boot=Number(process.argv[1]);
-    const expectedTables=["assets","audit_events","delivery_capabilities","idempotency_records","job_events","job_steps","jobs","oauth_identities","oauth_transactions","outbox_events","projects","provider_credential_references","quota_policies","quota_reservations","schema_migrations","sessions","system_metadata","upload_sessions","users"];
+    const expectedTables=["assets","audit_events","composition_asset_references","composition_versions","delivery_capabilities","idempotency_records","job_events","job_steps","jobs","oauth_identities","oauth_transactions","outbox_events","preview_artifacts","projects","provider_credential_references","quota_policies","quota_reservations","schema_migrations","sessions","system_metadata","upload_sessions","users"];
     const expectedMemberStatus=boot === 1 ? "pending" : "active";
     const expectedMemberSession=boot === 1 ? "active" : "revoked";
     const valid=d.metadataVersion === d.witness.startupCount && d.quickCheck === "ok" && d.foreignKeyFailures === 0 &&
-      JSON.stringify(d.ledger.map(row=>row.version)) === JSON.stringify([1,2,3,4,5,6]) &&
-      JSON.stringify(d.ledger.map(row=>row.name)) === JSON.stringify(["foundation_system_tables","persistence-kernel","identity-and-approval","canonical-project","private-assets","durable-job-kernel"]) &&
+      JSON.stringify(d.ledger.map(row=>row.version)) === JSON.stringify([1,2,3,4,5,6,7]) &&
+      JSON.stringify(d.ledger.map(row=>row.name)) === JSON.stringify(["foundation_system_tables","persistence-kernel","identity-and-approval","canonical-project","private-assets","durable-job-kernel","compositions-preview"]) &&
       JSON.stringify(d.coreTables) === JSON.stringify(expectedTables) &&
       JSON.stringify(d.litestreamTables) === JSON.stringify(["_litestream_lock","_litestream_seq"]) &&
       d.identities.length === 2 && d.users.length === 2 && d.sessions.length === 2 &&
@@ -697,7 +752,7 @@ for boot in 1 2 3; do
       d.users[1].status === expectedMemberStatus &&
       d.sessions[1].status === expectedMemberSession && d.projects.length === 1 &&
       d.projects[0].owner_user_id === d.users[0].id && d.projects[0].favorite === 1 &&
-      d.projects[0].name === "Recovery Project Updated" && d.projects[0].version === boot + 1 &&
+      d.projects[0].name === "Recovery Project Updated" && d.projects[0].version === (boot === 1 ? 3 : boot === 2 ? 4 : 5) &&
       d.projects[0].status === (boot === 2 ? "soft_deleted" : "active") &&
       (boot === 2 ? d.projects[0].deleted_at !== null && d.projects[0].purge_after !== null : d.projects[0].deleted_at === null && d.projects[0].purge_after === null) &&
       d.assets.length === 1 && d.assets[0].id === "00000000-0000-4000-8000-000000000201" &&
@@ -708,7 +763,10 @@ for boot in 1 2 3; do
         d.outboxBacklog.status === "published" && d.outboxBacklog.attempt_count === 1 && d.outboxBacklog.last_error_code === null) &&
       (boot === 1 ? d.jobs[0].status === "running" && d.jobs[0].attempt_count === 1 && d.jobs[0].lease_owner === "worker-A" && d.assets[0].ingestion_status === "processing" :
         d.jobs[0].status === "completed" && d.jobs[0].progress_basis_points === 10000 && d.jobs[0].attempt_count === 2 && d.steps[0].status === "completed" && d.assets[0].ingestion_status === "ready") &&
-      (boot === 1 ? d.jobEvents[0].sequences === "1,2,3" : d.jobEvents[0].max_sequence >= 8);
+      (boot === 1 ? d.jobEvents[0].sequences === "1,2,3" : d.jobEvents[0].max_sequence >= 8) &&
+      d.compositions.length === 1 && d.compositions[0].version_number === 1 && d.compositions[0].status === "valid" &&
+      d.compositionRefs.length === 0 && d.previews.length === 1 && d.previews[0].status === "ready" &&
+      d.compositionEvidence !== null && d.compositionEvidence.compositionId === d.compositions[0].id && d.compositionEvidence.previewId === d.previews[0].id && d.compositionEvidence.byteChecksum === d.previews[0].byte_checksum_sha256;
     if (!valid) process.exit(1);
   ' "$boot" <<<"$evidence"
   if [ "$boot" -eq 1 ]; then
@@ -720,7 +778,7 @@ for boot in 1 2 3; do
   fi
   if [ "$boot" -eq 2 ]; then terminal_event_sequences="$current_job_sequences"; fi
   if [ "$boot" -eq 3 ]; then test "$current_job_sequences" = "$terminal_event_sequences"; fi
-  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4,5,6 project_persistence=pass identity_persistence=pass job_persistence=pass outbox_backlog_status=$(docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(d.outboxBacklog.status)' <<<"$evidence") event_sequences=$current_job_sequences replica_objects=$boot_replica_objects restore_seconds=$restore_duration restore_bound_seconds=120 quick_check=ok foreign_keys=0"
+  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4,5,6,7 project_persistence=pass composition_persistence=pass preview_persistence=pass identity_persistence=pass job_persistence=pass outbox_backlog_status=$(docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(d.outboxBacklog.status)' <<<"$evidence") event_sequences=$current_job_sequences replica_objects=$boot_replica_objects restore_seconds=$restore_duration restore_bound_seconds=120 quick_check=ok foreign_keys=0"
   docker rm "$container" >/dev/null
   docker volume rm "$local_volume" >/dev/null
 done
@@ -753,12 +811,12 @@ docker run --rm --entrypoint node -v "$object_volume:/data" "$image" --input-typ
     join(root, entries[0]),
     Buffer.from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "base64url"),
   );
-  if (manifest.sourceSchemaVersion !== 5 || manifest.targetSchemaVersion !== 6 ||
-      JSON.stringify(manifest.migrationVersionsPending) !== JSON.stringify([6])) {
+  if (manifest.sourceSchemaVersion !== 6 || manifest.targetSchemaVersion !== 7 ||
+      JSON.stringify(manifest.migrationVersionsPending) !== JSON.stringify([7])) {
     process.exit(1);
   }
-  process.stdout.write("verified_pre_migration_backup=v5-to-v6\n");
+  process.stdout.write("verified_pre_migration_backup=v6-to-v7\n");
 '
 remaining_replica_objects="$(mc "ls --recursive ci/$bucket/$prefix | wc -l" | tr -d '[:space:]')"
 test "$remaining_replica_objects" -gt 0
-echo "replica_objects=$remaining_replica_objects single_verified_v6_backup=pass recovery_test=pass"
+echo "replica_objects=$remaining_replica_objects single_verified_v7_backup=pass recovery_test=pass"

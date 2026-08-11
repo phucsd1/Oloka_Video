@@ -39,10 +39,17 @@ test("denies outbound network while retaining runtime controls", async ({
   const attempted: string[] = [];
   let bootstrapComplete = false;
   await page.route("**/*", async (route) => {
-    const url = new URL(route.request().url());
+    const request = route.request();
+    const url = new URL(request.url());
     const isFixtureOrigin = url.origin === "http://127.0.0.1:4178";
-    if (bootstrapComplete || !isFixtureOrigin) {
+    const frame = request.frame();
+    const isPreviewFrame = frame !== page.mainFrame();
+    if (bootstrapComplete && isPreviewFrame) {
       attempted.push(`${url.origin}${url.pathname}`);
+      await route.abort();
+      return;
+    }
+    if (!isFixtureOrigin) {
       await route.abort();
       return;
     }
@@ -76,6 +83,55 @@ test("denies outbound network while retaining runtime controls", async ({
   );
   expect(events.some((event) => event.type === "duration")).toBe(true);
   expect(events.some((event) => event.type === "timeUpdate")).toBe(true);
+});
+
+test("keeps realistic visual, Vietnamese caption, Clean/Bold, and BGM fixtures network-zero", async ({
+  page,
+}) => {
+  const attempted: string[] = [];
+  let bootstrapComplete = false;
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const isPreviewFrame = request.frame() !== page.mainFrame();
+    if (bootstrapComplete && isPreviewFrame) {
+      attempted.push(`${url.origin}${url.pathname}`);
+      await route.abort();
+      return;
+    }
+    if (url.origin !== "http://127.0.0.1:4178") {
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  const frame = await waitForPreview(page);
+  bootstrapComplete = true;
+  await frame.evaluate(async () => {
+    const image = document.querySelector("#visual-asset");
+    if (image instanceof HTMLImageElement)
+      await image.decode().catch(() => undefined);
+    const audio = document.querySelector("#bgm");
+    if (audio instanceof HTMLMediaElement) {
+      audio.currentTime = 0;
+      audio.volume = 0.2;
+    }
+  });
+  await page.evaluate(() => {
+    const controller = (
+      window as unknown as {
+        __previewController: {
+          seek: (time: number) => void;
+          pause: () => void;
+        };
+      }
+    ).__previewController;
+    controller.seek(1.5);
+    controller.pause();
+  });
+  expect(attempted).toEqual([]);
+  await expect(frame.locator("#caption-clean")).toBeVisible();
+  await expect(frame.locator("#caption-bold")).toBeVisible();
 });
 
 test("blocks malformed, cross-channel, cross-window, and upstream bridge commands", async ({

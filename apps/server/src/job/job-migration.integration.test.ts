@@ -53,6 +53,7 @@ describe("Durable Job kernel migration v6", () => {
         { version: 4, name: "canonical-project" },
         { version: 5, name: "private-assets" },
         { version: 6, name: "durable-job-kernel" },
+        { version: 7, name: "compositions-preview" },
       ]);
     } finally {
       await database.close();
@@ -169,8 +170,8 @@ describe("Durable Job kernel migration v6", () => {
         ),
       ).resolves.toMatchObject({
         sourceSchemaVersion: 5,
-        targetSchemaVersion: 6,
-        migrationVersionsPending: [6],
+        targetSchemaVersion: 7,
+        migrationVersionsPending: [6, 7],
       });
       await database.migrate();
       expect(

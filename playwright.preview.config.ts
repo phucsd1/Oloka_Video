@@ -15,5 +15,7 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 30_000,
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "edge", use: { ...devices["Desktop Chrome"], channel: "msedge" } },
+  ],
 });

@@ -8,6 +8,7 @@ export interface ProjectRow {
   description: string | null;
   favorite: number;
   status: "active" | "soft_deleted" | "purge_scheduled" | "purging" | "purged";
+  current_composition_version_id: string | null;
   created_at: number;
   updated_at: number;
   deleted_at: number | null;
@@ -49,6 +50,7 @@ export class ProjectRepository {
       (context.database
         .prepare(
           `SELECT id, owner_user_id, name, description, favorite, status,
+                  current_composition_version_id,
                   created_at, updated_at, deleted_at, purge_after, version
              FROM projects WHERE id = ?`,
         )
@@ -95,6 +97,7 @@ export class ProjectRepository {
     return context.database
       .prepare(
         `SELECT id, owner_user_id, name, description, favorite, status,
+                current_composition_version_id,
                 created_at, updated_at, deleted_at, purge_after, version
            FROM projects
           WHERE owner_user_id = ? AND status = ?${favoriteFilter}${cursorFilter}

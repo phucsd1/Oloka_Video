@@ -60,6 +60,7 @@ COPY --from=build --chown=1000:1000 /app/node_modules ./node_modules
 COPY --from=build --chown=1000:1000 /app/apps/server/dist ./apps/server/dist
 COPY --from=build --chown=1000:1000 /app/apps/server/migrations ./apps/server/migrations
 COPY --from=build --chown=1000:1000 /app/apps/web/dist ./apps/web/dist
+COPY --from=build --chown=1000:1000 /app/third_party ./third_party
 COPY --from=build --chown=1000:1000 /app/packages/contracts/package.json ./packages/contracts/package.json
 COPY --from=build --chown=1000:1000 /app/packages/contracts/dist ./packages/contracts/dist
 USER 1000:1000

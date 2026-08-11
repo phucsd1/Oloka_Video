@@ -50,6 +50,8 @@ import { OutboxRepository } from "./database/repositories/outbox-repository.js";
 import { OutboxConsumer } from "./outbox/consumer.js";
 import { OutboxRuntime } from "./outbox/runtime.js";
 import { createPhase3EOutboxHandlerRegistry } from "./outbox/phase3e-handlers.js";
+import { CompositionService } from "./composition/composition-service.js";
+import { registerCompositionRoutes } from "./composition/composition-routes.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -176,6 +178,24 @@ export async function buildApplication(
     app,
     identityService,
     assetService,
+    storage,
+    publicOrigin: environment.identity?.publicOrigin,
+  });
+  const compositionService =
+    environment.appKey === undefined
+      ? undefined
+      : new CompositionService({
+          transactions: database.transactions,
+          storage,
+          applicationKey: environment.appKey,
+          clock,
+          idGenerator,
+          quotaPolicyResolver,
+        });
+  registerCompositionRoutes({
+    app,
+    identityService,
+    compositionService,
     storage,
     publicOrigin: environment.identity?.publicOrigin,
   });

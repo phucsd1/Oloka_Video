@@ -3,20 +3,27 @@ import {
   assetListResponseSchema,
   assetSchema,
   authSessionResponseSchema,
+  compositionListResponseSchema,
+  compositionVersionSchema,
   csrfResponseSchema,
+  deriveCompositionRequestSchema,
   errorEnvelopeSchema,
   jobEventHistoryResponseSchema,
   jobListResponseSchema,
   jobSchema,
   projectListResponseSchema,
   projectSchema,
+  previewArtifactSchema,
   uploadSessionSchema,
   type Asset,
+  type CompositionDocumentV1,
+  type CompositionVersion,
   type IdentityUser,
   type Job,
   type Project,
 } from "@oloka/contracts";
 import { Surface } from "@oloka/design-system";
+import { mountSecurePreviewHost } from "./preview/secure-preview-host";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
@@ -796,8 +803,487 @@ function ProjectCard(props: {
           getCsrfToken={props.getCsrfToken}
         />
       )}
+      {!editing && (
+        <CompositionWorkspace
+          project={props.project}
+          getCsrfToken={props.getCsrfToken}
+        />
+      )}
     </div>
   );
+}
+
+function CompositionWorkspace(props: {
+  project: Project;
+  getCsrfToken: () => Promise<string>;
+}) {
+  const [current, setCurrent] = useState<CompositionVersion | null>(null);
+  const [history, setHistory] = useState<CompositionVersion[]>([]);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [sceneText, setSceneText] = useState("Xin chào Việt Nam");
+  const [sceneDuration, setSceneDuration] = useState(4_000);
+  const [aspectRatio, setAspectRatio] =
+    useState<CompositionDocumentV1["aspectRatio"]>("16:9");
+  const [captionEnabled, setCaptionEnabled] = useState(true);
+  const [captionPreset, setCaptionPreset] = useState<"Clean" | "Bold">("Clean");
+  const [bgmAssetId, setBgmAssetId] = useState("");
+  const [bgmVolume, setBgmVolume] = useState(0.5);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [projectVersion, setProjectVersion] = useState(props.project.version);
+  const previewContainer = useRef<HTMLDivElement | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [currentResult, historyResult, assetsResult] = await Promise.all([
+        getJson(`/api/v1/projects/${props.project.id}/compositions/current`),
+        getJson(`/api/v1/projects/${props.project.id}/compositions?limit=25`),
+        getJson(`/api/v1/projects/${props.project.id}/assets?limit=100`),
+      ]);
+      const loaded =
+        currentResult === null
+          ? null
+          : compositionVersionSchema.parse(currentResult);
+      setCurrent(loaded);
+      setHistory(
+        compositionListResponseSchema.parse(historyResult).compositions,
+      );
+      setAssets(assetListResponseSchema.parse(assetsResult).assets);
+      if (loaded !== null) {
+        setSceneText(loaded.document.scenes[0]?.text ?? "");
+        setSceneDuration(
+          loaded.document.scenes[0]?.durationMs ?? loaded.document.durationMs,
+        );
+        setAspectRatio(loaded.document.aspectRatio);
+        setCaptionEnabled(loaded.document.captionConfig.enabled);
+        setCaptionPreset(loaded.document.captionConfig.preset);
+        setBgmAssetId(loaded.document.bgmConfig?.assetId ?? "");
+        setBgmVolume(loaded.document.bgmConfig?.volume ?? 0.5);
+      }
+      setError(null);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Composition load failed",
+      );
+    }
+  }, [props.project.id]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const container = previewContainer.current;
+    if (container === null || previewUrl === null) return;
+    let active = true;
+    let controller: ReturnType<typeof mountSecurePreviewHost> | undefined;
+    void fetch(previewUrl, { headers: { accept: "text/html" } })
+      .then((response) => {
+        if (!response.ok)
+          throw new Error(`Preview content returned ${response.status}`);
+        return response.text();
+      })
+      .then((html) => {
+        if (!active) return;
+        controller = mountSecurePreviewHost({ container, artifactHtml: html });
+      })
+      .catch((reason: unknown) =>
+        setError(
+          reason instanceof Error ? reason.message : "Preview load failed",
+        ),
+      );
+    return () => {
+      active = false;
+      controller?.destroy();
+    };
+  }, [previewUrl]);
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      const document = compositionDocumentFixture(
+        props.project.id,
+        sceneText,
+        sceneDuration,
+        aspectRatio,
+        captionEnabled,
+        captionPreset,
+        bgmAssetId,
+        bgmVolume,
+      );
+      const result = compositionVersionSchema.parse(
+        await mutateJson(
+          `/api/v1/projects/${props.project.id}/compositions`,
+          "POST",
+          { document, expectedProjectVersion: projectVersion },
+          props.getCsrfToken,
+        ),
+      );
+      setCurrent(result);
+      setProjectVersion((version) => version + 1);
+      await refresh();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Composition create failed",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const derive = async () => {
+    if (current === null) return;
+    setBusy(true);
+    try {
+      const edits = [
+        {
+          type: "sceneText",
+          sceneId: current.document.scenes[0]!.id,
+          text: sceneText,
+        },
+        {
+          type: "sceneDuration",
+          sceneId: current.document.scenes[0]!.id,
+          durationMs: sceneDuration,
+        },
+        { type: "aspectRatio", aspectRatio },
+        {
+          type: "caption",
+          captionConfig: {
+            ...current.document.captionConfig,
+            enabled: captionEnabled,
+            preset: captionPreset,
+          },
+        },
+        {
+          type: "bgm",
+          bgmConfig:
+            bgmAssetId === ""
+              ? null
+              : {
+                  assetId: bgmAssetId,
+                  volume: bgmVolume,
+                  ducking: {
+                    enabled: true,
+                    targetVolume: Math.min(0.3, bgmVolume),
+                    attackMs: 150,
+                    releaseMs: 300,
+                  },
+                },
+        },
+      ] as const;
+      const command = deriveCompositionRequestSchema.parse({
+        expectedProjectVersion: projectVersion,
+        edits,
+      });
+      const result = compositionVersionSchema.parse(
+        await mutateJson(
+          `/api/v1/compositions/${current.id}/derive`,
+          "POST",
+          command,
+          props.getCsrfToken,
+        ),
+      );
+      setCurrent(result);
+      setProjectVersion((version) => version + 1);
+      await refresh();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Composition derive failed",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const validate = async () => {
+    if (current === null) return;
+    try {
+      await mutateJson(
+        `/api/v1/compositions/${current.id}/validate`,
+        "POST",
+        {},
+        props.getCsrfToken,
+      );
+      setError(null);
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Composition validation failed",
+      );
+    }
+  };
+
+  const preview = async () => {
+    if (current === null) return;
+    setBusy(true);
+    try {
+      const artifact = previewArtifactSchema.parse(
+        await mutateJson(
+          `/api/v1/compositions/${current.id}/preview`,
+          "POST",
+          {},
+          props.getCsrfToken,
+        ),
+      );
+      setPreviewUrl(`${artifact.contentUrl}?v=${artifact.byteChecksumSha256}`);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Preview request failed",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const audioAssets = assets.filter(
+    (asset) => asset.kind === "audio" && asset.ingestionStatus === "ready",
+  );
+  return (
+    <Surface
+      className="composition-workspace"
+      aria-labelledby={`composition-${props.project.id}`}
+    >
+      <div className="card-heading">
+        <div>
+          <p className="eyebrow">Composition V1</p>
+          <h4 id={`composition-${props.project.id}`}>Canonical timeline</h4>
+        </div>
+        <button className="secondary-action" onClick={() => void refresh()}>
+          Refresh
+        </button>
+      </div>
+      {error !== null && (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      )}
+      {current === null ? (
+        <button
+          className="primary-action"
+          disabled={busy}
+          onClick={() => void create()}
+        >
+          Create structured composition
+        </button>
+      ) : (
+        <>
+          <div className="composition-editor-grid">
+            <label>
+              Frame preset
+              <select
+                value={aspectRatio}
+                onChange={(event) =>
+                  setAspectRatio(
+                    event.target.value as CompositionDocumentV1["aspectRatio"],
+                  )
+                }
+              >
+                <option>16:9</option>
+                <option>9:16</option>
+                <option>1:1</option>
+                <option>4:5</option>
+              </select>
+            </label>
+            <label>
+              Scene duration (ms)
+              <input
+                type="number"
+                min={1000}
+                max={300000}
+                value={sceneDuration}
+                onChange={(event) =>
+                  setSceneDuration(Number(event.target.value))
+                }
+              />
+            </label>
+            <label>
+              Caption style
+              <select
+                value={captionPreset}
+                onChange={(event) =>
+                  setCaptionPreset(event.target.value as "Clean" | "Bold")
+                }
+              >
+                <option>Clean</option>
+                <option>Bold</option>
+              </select>
+            </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={captionEnabled}
+                onChange={(event) => setCaptionEnabled(event.target.checked)}
+              />{" "}
+              Captions enabled
+            </label>
+            <label>
+              BGM
+              <select
+                value={bgmAssetId}
+                onChange={(event) => setBgmAssetId(event.target.value)}
+              >
+                <option value="">No BGM</option>
+                {audioAssets.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.originalFilename}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              BGM volume
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={bgmVolume}
+                onChange={(event) => setBgmVolume(Number(event.target.value))}
+              />
+            </label>
+          </div>
+          <label>
+            Scene text
+            <textarea
+              value={sceneText}
+              maxLength={4000}
+              onChange={(event) => setSceneText(event.target.value)}
+            />
+          </label>
+          <div className="project-actions">
+            <button
+              className="primary-action"
+              disabled={busy}
+              onClick={() => void derive()}
+            >
+              Derive version
+            </button>
+            <button
+              className="secondary-action"
+              disabled={busy}
+              onClick={() => void validate()}
+            >
+              Validate
+            </button>
+            <button
+              className="secondary-action"
+              disabled={busy}
+              onClick={() => void preview()}
+            >
+              Open read-only preview
+            </button>
+          </div>
+          <small>
+            Version {current.versionNumber} · {history.length} immutable
+            versions · owner-only
+          </small>
+          {previewUrl !== null && (
+            <div
+              ref={previewContainer}
+              className="preview-host"
+              aria-label="Read-only composition preview"
+            />
+          )}
+        </>
+      )}
+    </Surface>
+  );
+}
+
+function compositionDocumentFixture(
+  projectId: string,
+  text: string,
+  durationMs: number,
+  aspectRatio: CompositionDocumentV1["aspectRatio"],
+  captionEnabled: boolean,
+  captionPreset: "Clean" | "Bold",
+  bgmAssetId: string,
+  bgmVolume: number,
+): CompositionDocumentV1 {
+  const dimensions = {
+    "16:9": [1920, 1080],
+    "9:16": [1080, 1920],
+    "1:1": [1080, 1080],
+    "4:5": [1080, 1350],
+  }[aspectRatio] as unknown as readonly [number, number];
+  return {
+    schemaVersion: 1,
+    compositionId: crypto.randomUUID(),
+    name: `Composition for ${projectId}`,
+    aspectRatio,
+    width: dimensions[0],
+    height: dimensions[1],
+    fps: 30,
+    durationMs,
+    background: "#102030",
+    scenes: [
+      {
+        id: crypto.randomUUID(),
+        order: 0,
+        startMs: 0,
+        durationMs,
+        text,
+        narration: null,
+        assetReferences: [],
+        style: {
+          layout: "center",
+          foreground: "#ffffff",
+          accent: "#ffd23f",
+          paddingPercent: 8,
+          gapPercent: 4,
+        },
+        tracks: [],
+      },
+    ],
+    voiceConfig: {
+      voiceToken: "neutral-vi-v1",
+      locale: "vi-VN",
+      rate: 1,
+      gainDb: 0,
+    },
+    captionConfig: {
+      enabled: captionEnabled,
+      preset: captionPreset,
+      fontToken: "oloka-sans-v1",
+      safeMarginPercent: 8,
+      maxLines: 2,
+    },
+    bgmConfig:
+      bgmAssetId === ""
+        ? null
+        : {
+            assetId: bgmAssetId,
+            volume: bgmVolume,
+            ducking: {
+              enabled: true,
+              targetVolume: Math.min(0.3, bgmVolume),
+              attackMs: 150,
+              releaseMs: 300,
+            },
+          },
+    manifests: {
+      dependency: { schemaVersion: 1, hashSha256: "0".repeat(64) },
+      asset: { schemaVersion: 1, hashSha256: "0".repeat(64) },
+      font: { schemaVersion: 1, hashSha256: "0".repeat(64) },
+      caption: { schemaVersion: 1, hashSha256: "0".repeat(64) },
+    },
+    runtimeVersions: {
+      materializer: "client",
+      renderer: "client",
+      renderProtocol: 1,
+      hyperframes: "0.7.104",
+      hyperframesRuntimeSha256: "0".repeat(64),
+      templateRegistry: "client",
+    },
+    metadata: {
+      locale: "vi-VN",
+      title: text.slice(0, 80) || "Composition",
+      safeAreaMode: "action",
+    },
+  };
 }
 
 function AssetWorkspace(props: {

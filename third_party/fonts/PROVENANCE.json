@@ -1,0 +1,9 @@
+{
+  "family": "Noto Sans Variable",
+  "olokaTokens": ["oloka-sans-v1", "oloka-display-v1"],
+  "source": "https://github.com/google/fonts/blob/main/ofl/notosans/NotoSans%5Bwdth,wght%5D.ttf",
+  "license": "SIL Open Font License 1.1",
+  "licenseFile": "noto-sans/OFL.txt",
+  "sha256": "bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d",
+  "byteLength": 2049096
+}

@@ -33,7 +33,7 @@ describe("Project migration v4", () => {
           .all()
           .map((row) => (row as { version: number }).version),
       );
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7]);
       expect(database.listApplicationTables()).toContain("projects");
       await expect(database.checkReadiness()).resolves.toEqual({
         status: "ready",
