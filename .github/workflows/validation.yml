@@ -27,6 +27,7 @@ jobs:
       - run: npm run test:integration
       - run: npm run test:frontend
       - run: npm test
+      - run: npm run audit:hyperframes-runtime
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
@@ -53,6 +54,12 @@ jobs:
           test "$missing_exit" -ne 0
           grep -q 'HF_S3_ACCESS_KEY_ID is required' <<<"$missing_output"
           ! grep -q 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' <<<"$missing_output"
+          docker run --rm --entrypoint sh oloka-video:${GITHUB_SHA} -c \
+            'test $(wc -c < /app/third_party/hyperframes/v0.7.104/hyperframe.runtime.iife.js) -eq 342023 && echo "a61e40e57329eeb9941c35ff9dac3ed8f0abfcee3246d2c5bfa2332e2df0c0c0  /app/third_party/hyperframes/v0.7.104/hyperframe.runtime.iife.js" | sha256sum --check --strict'
+          docker run --rm --entrypoint sh oloka-video:${GITHUB_SHA} -c \
+            'test $(wc -c < /app/third_party/fonts/noto-sans/NotoSans-VF.ttf) -eq 2049096 && echo "bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d  /app/third_party/fonts/noto-sans/NotoSans-VF.ttf" | sha256sum --check --strict'
+          docker run --rm --entrypoint sh oloka-video:${GITHUB_SHA} -c \
+            'test ! -e /app/node_modules/@hyperframes/player && test ! -e /app/node_modules/@hyperframes/core && test ! -e /app/node_modules/@hyperframes/studio-server && ! grep -E "@hyperframes/(player|core|studio-server)" /app/package-lock.json'
       - name: Verify MinIO replication and ephemeral local recovery
         env:
           RECOVERY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
