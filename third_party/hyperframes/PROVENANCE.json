@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "heygen-com/hyperframes",
+    "release": "v0.7.104",
+    "commit": "c96b30c7174984e684620556ce871a285381ec60",
+    "license": "Apache-2.0"
+  },
+  "artifacts": [
+    {
+      "upstreamSourcePath": "@hyperframes/core@0.7.104/dist/hyperframe.runtime.iife.js",
+      "upstreamBuildSource": "packages/core/src/runtime/init.ts",
+      "localPath": "third_party/hyperframes/v0.7.104/hyperframe.runtime.iife.js",
+      "bytes": 342023,
+      "sha256": "a61e40e57329eeb9941c35ff9dac3ed8f0abfcee3246d2c5bfa2332e2df0c0c0",
+      "unchanged": true,
+      "modificationDescription": null,
+      "reproducibility": {
+        "status": "verified-published-npm-artifact",
+        "verificationCommand": "npm pack @hyperframes/core@0.7.104",
+        "sourceBuildByteIdentityClaimed": false,
+        "note": "The exact published runtime bytes are vendored and hash-verified; a source rebuild is not claimed byte-identical without the upstream release toolchain."
+      },
+      "licensePath": "third_party/hyperframes/v0.7.104/LICENSE"
+    }
+  ]
+}

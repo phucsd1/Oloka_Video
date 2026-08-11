@@ -15,7 +15,8 @@
     "@oloka/contracts": "0.1.0",
     "@oloka/design-system": "0.1.0",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "zod": "4.0.17"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "6.6.4",

@@ -11,6 +11,7 @@ export default tseslint.config(
       "**/.tmp/**",
       "playwright-report/**",
       "test-results/**",
+      "third_party/hyperframes/v0.7.104/hyperframe.runtime.iife.js",
     ],
   },
   eslint.configs.recommended,
@@ -24,18 +25,27 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["playwright.config.ts", "tests/e2e/*.ts"],
+          allowDefaultProject: [
+            "playwright.config.ts",
+            "playwright.preview.config.ts",
+            "tests/e2e/*.ts",
+            "tests/e2e-preview/*.ts",
+          ],
         },
         tsconfigRootDir: import.meta.dirname,
       },
     },
   },
   {
-    files: ["apps/server/**/*.ts", "*.ts", "*.js"],
+    files: ["apps/server/**/*.ts", "scripts/**/*.mjs", "*.ts", "*.js"],
     languageOptions: { globals: globals.node },
   },
   {
-    files: ["apps/web/**/*.ts", "apps/web/**/*.tsx"],
+    files: [
+      "apps/web/**/*.ts",
+      "apps/web/**/*.tsx",
+      "tests/preview-compat/**/*.ts",
+    ],
     languageOptions: { globals: globals.browser },
   },
   {
