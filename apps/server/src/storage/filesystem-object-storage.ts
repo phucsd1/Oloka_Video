@@ -18,11 +18,13 @@ const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 interface FilesystemObjectStorageOperations {
   link(source: string, destination: string): Promise<void>;
   copyFile(source: string, destination: string, mode: number): Promise<void>;
+  syncDurable(path: string): Promise<void>;
 }
 
 const DEFAULT_OPERATIONS: FilesystemObjectStorageOperations = {
   link,
   copyFile,
+  syncDurable: syncDurableFile,
 };
 
 export class FilesystemObjectStorage implements ObjectStorage {
@@ -113,15 +115,9 @@ export class FilesystemObjectStorage implements ObjectStorage {
         constants.COPYFILE_EXCL,
       );
     }
-    const destinationHandle = await this.openRegularFile(
-      destination,
-      constants.O_RDWR,
-    );
-    try {
-      await destinationHandle.sync();
-    } finally {
-      await destinationHandle.close();
-    }
+    await this.operations.syncDurable(destination).catch((error) => {
+      if (!isDurabilitySyncUnsupported(error)) throw error;
+    });
     await unlink(source);
   }
 
@@ -390,4 +386,25 @@ function isHardLinkUnsupported(error: unknown): boolean {
       (error as NodeJS.ErrnoException).code ?? "",
     )
   );
+}
+
+function isDurabilitySyncUnsupported(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    ["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM"].includes(
+      (error as NodeJS.ErrnoException).code ?? "",
+    )
+  );
+}
+
+async function syncDurableFile(path: string): Promise<void> {
+  const handle = await open(path, constants.O_RDWR | NO_FOLLOW);
+  try {
+    const entry = await handle.stat();
+    if (!entry.isFile())
+      throw new Error("Storage target is not a regular file");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
