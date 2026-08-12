@@ -177,4 +177,31 @@ describe("FilesystemObjectStorage", () => {
       size: 3,
     });
   });
+
+  it("falls back to an exclusive copy when hard links are unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "oloka-storage-copy-"));
+    temporaryDirectories.push(root);
+    let linkAttempted = false;
+    const storage = new FilesystemObjectStorage(root, {
+      link: () => {
+        linkAttempted = true;
+        const error = new Error(
+          "Hard links are unsupported",
+        ) as NodeJS.ErrnoException;
+        error.code = "ENOTSUP";
+        return Promise.reject(error);
+      },
+    });
+    const stagingKey = "preview-stage";
+    const storageKey = "v1/ab/00000000-0000-4000-8000-000000000001";
+    await storage.stage(stagingKey);
+    await storage.appendAtOffset(stagingKey, 0, Buffer.from("preview"));
+    await storage.finalize(stagingKey, storageKey);
+    expect(linkAttempted).toBe(true);
+    await expect(storage.head(storageKey)).resolves.toMatchObject({ size: 7 });
+    await expect(storage.statStaging(stagingKey)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await storage.close();
+  });
 });
