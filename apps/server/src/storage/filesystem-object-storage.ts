@@ -109,11 +109,16 @@ export class FilesystemObjectStorage implements ObjectStorage {
       await this.operations.link(source, destination);
     } catch (error) {
       if (!isHardLinkUnsupported(error)) throw error;
-      await this.operations.copyFile(
-        source,
-        destination,
-        constants.COPYFILE_EXCL,
-      );
+      try {
+        await this.operations.copyFile(
+          source,
+          destination,
+          constants.COPYFILE_EXCL,
+        );
+      } catch (copyError) {
+        if (!isHardLinkUnsupported(copyError)) throw copyError;
+        await copyFileExclusively(source, destination);
+      }
     }
     await this.operations.syncDurable(destination).catch((error) => {
       if (!isDurabilitySyncUnsupported(error)) throw error;
@@ -406,5 +411,48 @@ async function syncDurableFile(path: string): Promise<void> {
     await handle.sync();
   } finally {
     await handle.close();
+  }
+}
+
+async function copyFileExclusively(
+  source: string,
+  destination: string,
+): Promise<void> {
+  const sourceHandle = await open(source, constants.O_RDONLY | NO_FOLLOW);
+  let destinationHandle;
+  try {
+    destinationHandle = await open(
+      destination,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
+      0o600,
+    );
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (true) {
+      const { bytesRead } = await sourceHandle.read(
+        buffer,
+        0,
+        buffer.length,
+        position,
+      );
+      if (bytesRead === 0) break;
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await destinationHandle.write(
+          buffer,
+          written,
+          bytesRead - written,
+          position + written,
+        );
+        written += result.bytesWritten;
+      }
+      position += bytesRead;
+    }
+    await destinationHandle.sync().catch((error) => {
+      if (!isDurabilitySyncUnsupported(error)) throw error;
+    });
+  } finally {
+    await destinationHandle?.close();
+    await sourceHandle.close();
   }
 }

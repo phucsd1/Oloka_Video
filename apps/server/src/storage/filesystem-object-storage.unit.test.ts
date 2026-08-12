@@ -228,4 +228,30 @@ describe("FilesystemObjectStorage", () => {
     });
     await storage.close();
   });
+
+  it("copies exclusively when mounted storage supports neither link nor copyFile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "oloka-storage-manual-copy-"));
+    temporaryDirectories.push(root);
+    const unsupported = () => {
+      const error = new Error(
+        "Mounted operation is unsupported",
+      ) as NodeJS.ErrnoException;
+      error.code = "ENOTSUP";
+      return Promise.reject(error);
+    };
+    const storage = new FilesystemObjectStorage(root, {
+      link: unsupported,
+      copyFile: unsupported,
+    });
+    const stagingKey = "preview-stage";
+    const storageKey = "v1/ab/00000000-0000-4000-8000-000000000003";
+    await storage.stage(stagingKey);
+    await storage.appendAtOffset(stagingKey, 0, Buffer.from("preview"));
+    await storage.finalize(stagingKey, storageKey);
+    await expect(storage.head(storageKey)).resolves.toMatchObject({ size: 7 });
+    await expect(storage.statStaging(stagingKey)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await storage.close();
+  });
 });
