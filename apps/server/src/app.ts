@@ -9,13 +9,16 @@ import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { AppEnvironment } from "./config/environment.js";
 import { createDatabase } from "./database/create-database.js";
+import type { TransactionRunner } from "./database/database.js";
 import { FilesystemObjectStorage } from "./storage/filesystem-object-storage.js";
+import type { ObjectStorage } from "./storage/object-storage.js";
 import { HealthService } from "./system/health-service.js";
 import { ReadinessService } from "./system/readiness-service.js";
 import { VersionService } from "./system/version-service.js";
 import { RuntimeWitnessService } from "./system/runtime-witness-service.js";
 import { SystemClock } from "./kernel/clock.js";
 import { UuidIdGenerator } from "./kernel/id-generator.js";
+import type { IdGenerator } from "./kernel/id-generator.js";
 import { OperationalMetrics } from "./observability/operational-metrics.js";
 import { registerIdentityRoutes } from "./identity/identity-routes.js";
 import type { OidcProviderClient } from "./identity/oidc-provider-client.js";
@@ -53,12 +56,22 @@ import { createPhase3EOutboxHandlerRegistry } from "./outbox/phase3e-handlers.js
 import { CompositionService } from "./composition/composition-service.js";
 import { registerCompositionRoutes } from "./composition/composition-routes.js";
 import { PreviewArtifactMaintenanceService } from "./composition/preview-artifact-maintenance-service.js";
+import { PreviewArtifactMaintenanceRuntime } from "./composition/preview-artifact-maintenance-runtime.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
   serveFrontend?: boolean;
   metrics?: OperationalMetrics;
   oidcClient?: OidcProviderClient;
+  previewMaintenance?: {
+    pollIntervalMs?: number;
+    shutdownGraceMs?: number;
+    serviceFactory?: (dependencies: {
+      transactions: TransactionRunner;
+      storage: ObjectStorage;
+      idGenerator: IdGenerator;
+    }) => Pick<PreviewArtifactMaintenanceService, "run">;
+  };
 }
 
 export async function buildApplication(
@@ -200,12 +213,43 @@ export async function buildApplication(
     storage,
     publicOrigin: environment.identity?.publicOrigin,
   });
-  const previewMaintenance = new PreviewArtifactMaintenanceService({
-    transactions: database.transactions,
-    storage,
-    idGenerator,
-  });
-  await previewMaintenance.run(Date.now());
+  const previewMaintenance =
+    options.previewMaintenance?.serviceFactory?.({
+      transactions: database.transactions,
+      storage,
+      idGenerator,
+    }) ??
+    new PreviewArtifactMaintenanceService({
+      transactions: database.transactions,
+      storage,
+      idGenerator,
+    });
+  const previewMaintenanceRuntime = new PreviewArtifactMaintenanceRuntime(
+    previewMaintenance,
+    {
+      pollIntervalMs: options.previewMaintenance?.pollIntervalMs ?? 60_000,
+      clock,
+      ...(options.previewMaintenance?.shutdownGraceMs === undefined
+        ? {}
+        : { shutdownGraceMs: options.previewMaintenance.shutdownGraceMs }),
+      onError: (error) => {
+        app.log.error(
+          {
+            event: "preview.maintenance.failed",
+            errorType: error instanceof Error ? error.name : "UnknownError",
+          },
+          "preview retention maintenance failed",
+        );
+      },
+      onShutdownTimeout: () => {
+        app.log.error(
+          { event: "preview.maintenance.shutdown_timeout" },
+          "preview retention maintenance exceeded shutdown grace",
+        );
+      },
+    },
+  );
+  await previewMaintenanceRuntime.start();
   const jobRepository = new JobRepository(idGenerator);
   const jobOperationsActivity = new JobOperationsActivity();
   const jobDispatcher =
@@ -351,19 +395,6 @@ export async function buildApplication(
     60 * 60 * 1000,
   );
   identityMaintenanceInterval.unref();
-  const previewMaintenanceInterval = setInterval(() => {
-    void previewMaintenance.run(Date.now()).catch((error: unknown) => {
-      app.log.error(
-        {
-          event: "preview.maintenance.failed",
-          errorType: error instanceof Error ? error.name : "UnknownError",
-        },
-        "preview retention maintenance failed",
-      );
-    });
-  }, 60_000);
-  previewMaintenanceInterval.unref();
-
   if (options.serveFrontend !== false) {
     const webRoot = resolve(process.cwd(), "apps/web/dist");
     await app.register(fastifyStatic, { root: webRoot, wildcard: false });
@@ -381,7 +412,7 @@ export async function buildApplication(
   app.addHook("onClose", async () => {
     clearInterval(identityMaintenanceInterval);
     clearInterval(assetMaintenanceInterval);
-    clearInterval(previewMaintenanceInterval);
+    await previewMaintenanceRuntime.stop();
     await outboxRuntime?.stop();
     await jobDispatcher?.stop();
     await Promise.all([storage.close(), database.close()]);

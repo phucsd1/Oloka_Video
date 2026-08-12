@@ -11,6 +11,7 @@ import { BaselineQuotaPolicyResolver } from "../quota/quota-policy.js";
 import { FilesystemObjectStorage } from "../storage/filesystem-object-storage.js";
 import { CompositionService } from "./composition-service.js";
 import { PreviewArtifactMaintenanceService } from "./preview-artifact-maintenance-service.js";
+import { PreviewArtifactMaintenanceRuntime } from "./preview-artifact-maintenance-runtime.js";
 
 const directories: string[] = [];
 
@@ -605,6 +606,110 @@ describe("Composition service", () => {
     } finally {
       await secondStorage.close();
       await secondDatabase.close();
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("single-flights purge ticks so no stale delete removes rehydrated bytes", async () => {
+    const fixture = await createFixture();
+    try {
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: compositionFixture(), expectedProjectVersion: 1 },
+        "single-flight-purge-create",
+      );
+      const first = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "single-flight-purge-preview",
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE preview_artifacts SET purge_after = created_at + 1 WHERE id = ?",
+          )
+          .run(first.preview.id);
+      });
+      let deleteCalls = 0;
+      let releaseDelete: (() => void) | undefined;
+      let deletionStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        deletionStarted = resolve;
+      });
+      const release = new Promise<void>((resolve) => {
+        releaseDelete = resolve;
+      });
+      const originalDelete = fixture.storage.delete.bind(fixture.storage);
+      fixture.storage.delete = async (...args) => {
+        deleteCalls += 1;
+        deletionStarted?.();
+        await release;
+        return originalDelete(...args);
+      };
+      const runtime = new PreviewArtifactMaintenanceRuntime(
+        new PreviewArtifactMaintenanceService({
+          transactions: fixture.database.transactions,
+          storage: fixture.storage,
+          idGenerator: {
+            generate: () =>
+              `00000000-0000-4000-8000-${String(++secondId).padStart(12, "0")}`,
+          },
+        }),
+        {
+          pollIntervalMs: 60_000,
+          clock: { now: () => 1_700_000_000_010 },
+        },
+      );
+
+      const passA = runtime.start();
+      await started;
+      const passB = runtime.runOnce();
+      await Promise.resolve();
+      expect(deleteCalls).toBe(1);
+
+      releaseDelete?.();
+      await Promise.all([passA, passB]);
+      const rehydrated = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "single-flight-purge-rehydrate",
+      );
+      await runtime.stop();
+      await Promise.resolve();
+
+      const state = fixture.database.transactions.run(
+        "read",
+        ({ database }) => ({
+          preview: database
+            .prepare(
+              "SELECT COUNT(*) AS count, MIN(status) AS status, MIN(storage_key) AS storage_key, MIN(byte_checksum_sha256) AS byte_checksum_sha256 FROM preview_artifacts",
+            )
+            .get() as {
+            count: number;
+            status: string;
+            storage_key: string;
+            byte_checksum_sha256: string;
+          },
+          purgeAudits: database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'preview.purged'",
+            )
+            .get(),
+        }),
+      );
+      expect(state.preview).toMatchObject({ count: 1, status: "ready" });
+      expect(state.purgeAudits).toEqual({ count: 1 });
+      expect(deleteCalls).toBe(1);
+      expect(rehydrated.preview.id).toBe(first.preview.id);
+      expect(await fixture.storage.createHash(state.preview.storage_key)).toBe(
+        state.preview.byte_checksum_sha256,
+      );
+      expect(
+        (await fixture.storage.listForReconciliation()).durable,
+      ).toHaveLength(1);
+    } finally {
       await fixture.storage.close();
       await fixture.database.close();
     }
