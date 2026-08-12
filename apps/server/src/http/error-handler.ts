@@ -2,6 +2,7 @@ import { errorEnvelopeSchema } from "@oloka/contracts";
 import type { FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import { ApplicationError, publicErrorCatalog } from "./application-error.js";
+import { readMaterializationStage } from "../composition/composition-materializer.js";
 
 export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error, request, reply) => {
@@ -24,6 +25,7 @@ export function registerErrorHandler(app: FastifyInstance): void {
           errorCode: readErrorCode(error),
           errorSyscall: readErrorSyscall(error),
           previewStage: readPreviewStage(error),
+          materializationStage: readMaterializationStage(error),
         },
         "request failed",
       );

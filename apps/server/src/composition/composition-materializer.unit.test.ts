@@ -1,8 +1,23 @@
 import type { CompositionDocumentV1 } from "@oloka/contracts";
 import { describe, expect, it } from "vitest";
-import { materializeCompositionPreview } from "./composition-materializer.js";
+import {
+  materializeCompositionPreview,
+  readMaterializationStage,
+} from "./composition-materializer.js";
 
 describe("composition preview materializer", () => {
+  it("exposes only the fixed materialization stage attached to a failure", () => {
+    const error = new Error("sensitive materializer detail");
+    Object.defineProperty(error, "materializationStage", {
+      value: "load-font",
+    });
+
+    expect(readMaterializationStage(error)).toBe("load-font");
+    expect(
+      readMaterializationStage({ materializationStage: "private/path" }),
+    ).toBeUndefined();
+  });
+
   it("produces identical self-contained bytes for the full structured fixture", async () => {
     const assets = [
       {
