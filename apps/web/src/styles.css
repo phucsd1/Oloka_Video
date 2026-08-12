@@ -444,6 +444,12 @@ h1 {
   max-width: 100%;
   overflow: hidden;
 }
+
+.preview-limit-note {
+  margin: 0 0 8px;
+  color: var(--muted-text, #667085);
+  font-size: 0.8rem;
+}
 .preview-host iframe {
   border: 0;
   height: 100%;

@@ -1180,6 +1180,10 @@ function CompositionWorkspace(props: {
             Version {current.versionNumber} · {history.length} immutable
             versions · owner-only
           </small>
+          <p className="preview-limit-note">
+            Preview kỹ thuật giới hạn tổng dữ liệu Asset nhúng ở mức 16 MiB. Đây
+            chỉ là giới hạn preview; Asset upload vẫn hỗ trợ tối đa 500 MB.
+          </p>
           {previewUrl !== null && (
             <div
               ref={previewContainer}

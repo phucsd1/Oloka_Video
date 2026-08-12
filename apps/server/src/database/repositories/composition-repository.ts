@@ -224,6 +224,14 @@ export interface PreviewArtifactRow {
 }
 
 export class PreviewArtifactRepository {
+  getById(context: TransactionContext, id: string): PreviewArtifactRow | null {
+    return (
+      (context.database
+        .prepare("SELECT * FROM preview_artifacts WHERE id = ?")
+        .get(id) as PreviewArtifactRow | undefined) ?? null
+    );
+  }
+
   findIdentity(
     context: TransactionContext,
     input: {
@@ -275,6 +283,27 @@ export class PreviewArtifactRepository {
         row.purge_after,
       );
     return row;
+  }
+
+  markRehydrated(
+    context: TransactionContext,
+    input: { id: string; purgeAfter: number },
+  ): boolean {
+    return (
+      context.database
+        .prepare(
+          "UPDATE preview_artifacts SET status = 'ready', purge_after = ? WHERE id = ? AND status = 'purged'",
+        )
+        .run(input.purgeAfter, input.id).changes === 1
+    );
+  }
+
+  quarantine(context: TransactionContext, id: string): void {
+    context.database
+      .prepare(
+        "UPDATE preview_artifacts SET status = 'quarantined', purge_after = NULL WHERE id = ? AND status IN ('purged', 'purge_scheduled')",
+      )
+      .run(id);
   }
 
   getOwned(

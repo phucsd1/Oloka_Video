@@ -33,6 +33,46 @@ test("uses an opaque allow-scripts-only iframe and strict CSP", async ({
   expect(csp).not.toMatch(/(?:^|;\s*)\*(?:\s|;|$)/);
 });
 
+test("direct preview navigation keeps an opaque origin under HTTP sandbox CSP", async ({
+  page,
+}) => {
+  await page.goto(
+    "/api/v1/previews/00000000-0000-4000-8000-000000000001/content",
+  );
+  await expect(page.locator("#direct-preview-ready")).toHaveText("ready");
+  const evidence = await page.evaluate(async () => {
+    const denied = (operation: () => unknown) => {
+      try {
+        operation();
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    let networkDenied = false;
+    try {
+      await fetch("/origin-probe");
+    } catch {
+      networkDenied = true;
+    }
+    return {
+      effectiveOrigin: globalThis.origin,
+      cookieDenied: denied(() => document.cookie),
+      storageDenied: denied(() => localStorage.getItem("secret")),
+      networkDenied,
+    };
+  });
+  expect(evidence).toEqual({
+    effectiveOrigin: "null",
+    cookieDenied: true,
+    storageDenied: true,
+    networkDenied: true,
+  });
+  expect(
+    await page.locator("#direct-preview-ready").getAttribute("data-csp"),
+  ).toBe("sandbox allow-scripts");
+});
+
 test("denies outbound network while retaining runtime controls", async ({
   page,
 }) => {

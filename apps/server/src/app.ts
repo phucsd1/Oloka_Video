@@ -52,6 +52,7 @@ import { OutboxRuntime } from "./outbox/runtime.js";
 import { createPhase3EOutboxHandlerRegistry } from "./outbox/phase3e-handlers.js";
 import { CompositionService } from "./composition/composition-service.js";
 import { registerCompositionRoutes } from "./composition/composition-routes.js";
+import { PreviewArtifactMaintenanceService } from "./composition/preview-artifact-maintenance-service.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -199,6 +200,12 @@ export async function buildApplication(
     storage,
     publicOrigin: environment.identity?.publicOrigin,
   });
+  const previewMaintenance = new PreviewArtifactMaintenanceService({
+    transactions: database.transactions,
+    storage,
+    idGenerator,
+  });
+  await previewMaintenance.run(Date.now());
   const jobRepository = new JobRepository(idGenerator);
   const jobOperationsActivity = new JobOperationsActivity();
   const jobDispatcher =
@@ -344,6 +351,18 @@ export async function buildApplication(
     60 * 60 * 1000,
   );
   identityMaintenanceInterval.unref();
+  const previewMaintenanceInterval = setInterval(() => {
+    void previewMaintenance.run(Date.now()).catch((error: unknown) => {
+      app.log.error(
+        {
+          event: "preview.maintenance.failed",
+          errorType: error instanceof Error ? error.name : "UnknownError",
+        },
+        "preview retention maintenance failed",
+      );
+    });
+  }, 60_000);
+  previewMaintenanceInterval.unref();
 
   if (options.serveFrontend !== false) {
     const webRoot = resolve(process.cwd(), "apps/web/dist");
@@ -362,6 +381,7 @@ export async function buildApplication(
   app.addHook("onClose", async () => {
     clearInterval(identityMaintenanceInterval);
     clearInterval(assetMaintenanceInterval);
+    clearInterval(previewMaintenanceInterval);
     await outboxRuntime?.stop();
     await jobDispatcher?.stop();
     await Promise.all([storage.close(), database.close()]);

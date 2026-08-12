@@ -10,6 +10,7 @@ import type { AuthenticatedSession } from "../identity/identity-service.js";
 import { BaselineQuotaPolicyResolver } from "../quota/quota-policy.js";
 import { FilesystemObjectStorage } from "../storage/filesystem-object-storage.js";
 import { CompositionService } from "./composition-service.js";
+import { PreviewArtifactMaintenanceService } from "./preview-artifact-maintenance-service.js";
 
 const directories: string[] = [];
 
@@ -46,7 +47,7 @@ describe("Composition service", () => {
             .get(fixture.projectId),
           version: database
             .prepare(
-              "SELECT version_number, canonical_hash_sha256 FROM composition_versions",
+              "SELECT version_number, canonical_hash_sha256, semantic_request_hash_sha256 FROM composition_versions",
             )
             .get(),
         }),
@@ -55,7 +56,10 @@ describe("Composition service", () => {
         current_composition_version_id: created.composition.id,
         version: 2,
       });
-      expect(state.version).toMatchObject({ version_number: 1 });
+      expect(state.version).toMatchObject({
+        version_number: 1,
+        semantic_request_hash_sha256: null,
+      });
       expect(() =>
         fixture.database.transactions.run("immediate", ({ database }) =>
           database
@@ -143,6 +147,464 @@ describe("Composition service", () => {
       expect(leftovers.staging).toHaveLength(0);
       expect(leftovers.durable).toHaveLength(1);
     } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("keeps canonical, command, generator, and artifact hashes semantically distinct", async () => {
+    const fixture = await createFixture();
+    try {
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: compositionFixture(), expectedProjectVersion: 1 },
+        "semantic-lineage-create",
+      );
+      const preview = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "semantic-lineage-preview",
+      );
+      const hashes = fixture.database.transactions.run(
+        "read",
+        ({ database }) => ({
+          composition: database
+            .prepare(
+              "SELECT canonical_hash_sha256, semantic_request_hash_sha256 FROM composition_versions WHERE id = ?",
+            )
+            .get(created.composition.id) as {
+            canonical_hash_sha256: string;
+            semantic_request_hash_sha256: string | null;
+          },
+          command: database
+            .prepare(
+              "SELECT semantic_request_hash_sha256 FROM idempotency_records WHERE operation = 'composition.create'",
+            )
+            .get() as { semantic_request_hash_sha256: string },
+          artifact: database
+            .prepare(
+              "SELECT byte_checksum_sha256 FROM preview_artifacts WHERE id = ?",
+            )
+            .get(preview.preview.id) as { byte_checksum_sha256: string },
+        }),
+      );
+      expect(hashes.composition.semantic_request_hash_sha256).toBeNull();
+      expect(hashes.composition.canonical_hash_sha256).toBe(
+        created.composition.canonicalHashSha256,
+      );
+      expect(hashes.artifact.byte_checksum_sha256).toBe(
+        preview.preview.byteChecksumSha256,
+      );
+      expect(
+        new Set([
+          hashes.composition.canonical_hash_sha256,
+          hashes.command.semantic_request_hash_sha256,
+          hashes.artifact.byte_checksum_sha256,
+        ]),
+      ).toHaveLength(3);
+    } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("rejects 16 MiB plus one before opening an Asset stream", async () => {
+    const fixture = await createFixture();
+    try {
+      const asset = await insertAsset(fixture, {
+        id: "30000000-0000-4000-8000-000000000098",
+        projectId: fixture.projectId,
+        ownerUserId: fixture.actor.user.id,
+        kind: "image",
+      });
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare("UPDATE assets SET byte_size = ? WHERE id = ?")
+          .run(16 * 1024 * 1024 + 1, asset.id);
+      });
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: withVisualAsset(asset.id), expectedProjectVersion: 1 },
+        "preview-limit-create",
+      );
+      let opened = 0;
+      const originalOpenRange = fixture.storage.openRange.bind(fixture.storage);
+      fixture.storage.openRange = (...args) => {
+        opened += 1;
+        return originalOpenRange(...args);
+      };
+
+      await expect(
+        fixture.service.requestPreview(
+          fixture.actor,
+          created.composition.id,
+          "preview-limit-request",
+        ),
+      ).rejects.toThrow(/preview_embedded_media_limit/i);
+      expect(opened).toBe(0);
+    } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("revalidates current Asset availability without mutating historical validation", async () => {
+    const fixture = await createFixture();
+    try {
+      const asset = await insertAsset(fixture, {
+        id: "30000000-0000-4000-8000-000000000099",
+        projectId: fixture.projectId,
+        ownerUserId: fixture.actor.user.id,
+        kind: "image",
+      });
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        {
+          document: withVisualAsset(asset.id),
+          expectedProjectVersion: 1,
+        },
+        "validate-current-asset-create",
+      );
+      const storedBefore = fixture.database.transactions.run(
+        "read",
+        ({ database }) =>
+          database
+            .prepare(
+              "SELECT validation_json FROM composition_versions WHERE id = ?",
+            )
+            .get(created.composition.id) as { validation_json: string },
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE assets SET lifecycle_status = 'soft_deleted', deleted_at = 2, purge_after = 3, version = version + 1 WHERE id = ?",
+          )
+          .run(asset.id);
+      });
+
+      expect(() =>
+        fixture.service.validate(
+          fixture.actor,
+          created.composition.id,
+          "validate-current-asset",
+        ),
+      ).toThrow(/composition_asset_unavailable/i);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT validation_json FROM composition_versions WHERE id = ?",
+            )
+            .get(created.composition.id),
+        ),
+      ).toEqual(storedBefore);
+    } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("rejects one validation idempotency key reused for another Composition", async () => {
+    const fixture = await createFixture();
+    try {
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: compositionFixture(), expectedProjectVersion: 1 },
+        "validate-conflict-create",
+      );
+      const derived = fixture.service.derive(
+        fixture.actor,
+        created.composition.id,
+        {
+          edits: [
+            {
+              type: "sceneText",
+              sceneId: compositionFixture().scenes[0]!.id,
+              text: "A distinct canonical composition",
+            },
+          ],
+          expectedProjectVersion: 2,
+        },
+        "validate-conflict-derive",
+      );
+
+      expect(
+        fixture.service.validate(
+          fixture.actor,
+          created.composition.id,
+          "validate-conflict-key",
+        ),
+      ).toMatchObject({ replayed: false });
+      expect(() =>
+        fixture.service.validate(
+          fixture.actor,
+          derived.composition.id,
+          "validate-conflict-key",
+        ),
+      ).toThrow(/composition_idempotency_conflict/i);
+    } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("purges expired preview bytes asynchronously while retaining row evidence", async () => {
+    const fixture = await createFixture();
+    try {
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: compositionFixture(), expectedProjectVersion: 1 },
+        "preview-retention-create",
+      );
+      const preview = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "preview-retention-request",
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE preview_artifacts SET purge_after = created_at + 1 WHERE id = ?",
+          )
+          .run(preview.preview.id);
+      });
+      const maintenance = new PreviewArtifactMaintenanceService({
+        transactions: fixture.database.transactions,
+        storage: fixture.storage,
+        idGenerator: {
+          generate: () =>
+            `00000000-0000-4000-8000-${String(++secondId).padStart(12, "0")}`,
+        },
+      });
+
+      await expect(maintenance.run(1_700_000_000_002, 10)).resolves.toEqual({
+        scheduled: 1,
+        purged: 1,
+        failed: 0,
+      });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT status FROM preview_artifacts WHERE id = ?")
+            .get(preview.preview.id),
+        ),
+      ).toEqual({ status: "purged" });
+      expect((await fixture.storage.listForReconciliation()).durable).toEqual(
+        [],
+      );
+    } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("resumes a scheduled preview purge after storage failure and restart", async () => {
+    const fixture = await createFixture();
+    try {
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: compositionFixture(), expectedProjectVersion: 1 },
+        "preview-purge-restart-create",
+      );
+      const preview = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "preview-purge-restart-request",
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE preview_artifacts SET purge_after = created_at + 1 WHERE id = ?",
+          )
+          .run(preview.preview.id);
+      });
+      const originalDelete = fixture.storage.delete.bind(fixture.storage);
+      fixture.storage.delete = () =>
+        Promise.reject(new Error("injected preview purge failure"));
+      const firstMaintenance = new PreviewArtifactMaintenanceService({
+        transactions: fixture.database.transactions,
+        storage: fixture.storage,
+        idGenerator: {
+          generate: () =>
+            `00000000-0000-4000-8000-${String(++secondId).padStart(12, "0")}`,
+        },
+      });
+      await expect(
+        firstMaintenance.run(1_700_000_000_002, 10),
+      ).resolves.toEqual({ scheduled: 1, purged: 0, failed: 1 });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT status FROM preview_artifacts WHERE id = ?")
+            .get(preview.preview.id),
+        ),
+      ).toEqual({ status: "purge_scheduled" });
+
+      fixture.storage.delete = originalDelete;
+      const restartedMaintenance = new PreviewArtifactMaintenanceService({
+        transactions: fixture.database.transactions,
+        storage: fixture.storage,
+        idGenerator: {
+          generate: () =>
+            `00000000-0000-4000-8000-${String(++secondId).padStart(12, "0")}`,
+        },
+      });
+      await expect(
+        restartedMaintenance.run(1_700_000_000_003, 10),
+      ).resolves.toEqual({ scheduled: 0, purged: 1, failed: 0 });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count, MIN(status) AS status FROM preview_artifacts",
+            )
+            .get(),
+        ),
+      ).toEqual({ count: 1, status: "purged" });
+    } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("rehydrates the same purged PreviewArtifact identity", async () => {
+    const fixture = await createFixture();
+    try {
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: compositionFixture(), expectedProjectVersion: 1 },
+        "preview-rehydrate-create",
+      );
+      const first = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "preview-rehydrate-first",
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE preview_artifacts SET status = 'purge_scheduled' WHERE id = ?",
+          )
+          .run(first.preview.id);
+      });
+      const maintenance = new PreviewArtifactMaintenanceService({
+        transactions: fixture.database.transactions,
+        storage: fixture.storage,
+        idGenerator: {
+          generate: () =>
+            `00000000-0000-4000-8000-${String(++secondId).padStart(12, "0")}`,
+        },
+      });
+      await maintenance.run(1_700_000_000_010, 10);
+
+      const rehydrated = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "preview-rehydrate-second",
+      );
+      expect(rehydrated.preview).toMatchObject({
+        id: first.preview.id,
+        byteChecksumSha256: first.preview.byteChecksumSha256,
+        status: "ready",
+      });
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare("SELECT COUNT(*) AS count FROM preview_artifacts")
+            .get(),
+        ),
+      ).toEqual({ count: 1 });
+      expect(
+        (await fixture.storage.listForReconciliation()).durable,
+      ).toHaveLength(1);
+    } finally {
+      await fixture.storage.close();
+      await fixture.database.close();
+    }
+  });
+
+  it("converges concurrent rehydration on one row and durable object", async () => {
+    const fixture = await createFixture();
+    const secondDatabase = await SqliteSystemDatabase.connect(
+      fixture.databaseUrl,
+      { appKey: Buffer.alloc(32, 7) },
+    );
+    const secondStorage = new FilesystemObjectStorage(fixture.objectRoot);
+    const secondService = new CompositionService({
+      transactions: secondDatabase.transactions,
+      storage: secondStorage,
+      applicationKey: Buffer.alloc(32, 8),
+      clock: { now: () => 1_700_000_000_000 },
+      idGenerator: {
+        generate: () =>
+          `00000000-0000-4000-8000-${String(++secondId).padStart(12, "0")}`,
+      },
+      quotaPolicyResolver: new BaselineQuotaPolicyResolver(),
+    });
+    try {
+      const created = fixture.service.create(
+        fixture.actor,
+        fixture.projectId,
+        { document: compositionFixture(), expectedProjectVersion: 1 },
+        "concurrent-rehydrate-create",
+      );
+      const first = await fixture.service.requestPreview(
+        fixture.actor,
+        created.composition.id,
+        "concurrent-rehydrate-first",
+      );
+      fixture.database.transactions.run("immediate", ({ database }) => {
+        database
+          .prepare(
+            "UPDATE preview_artifacts SET status = 'purge_scheduled' WHERE id = ?",
+          )
+          .run(first.preview.id);
+      });
+      await new PreviewArtifactMaintenanceService({
+        transactions: fixture.database.transactions,
+        storage: fixture.storage,
+        idGenerator: {
+          generate: () =>
+            `00000000-0000-4000-8000-${String(++secondId).padStart(12, "0")}`,
+        },
+      }).run(1_700_000_000_010, 10);
+
+      const [left, right] = await Promise.all([
+        fixture.service.requestPreview(
+          fixture.actor,
+          created.composition.id,
+          "concurrent-rehydrate-left",
+        ),
+        secondService.requestPreview(
+          fixture.actor,
+          created.composition.id,
+          "concurrent-rehydrate-right",
+        ),
+      ]);
+      expect(left.preview.id).toBe(first.preview.id);
+      expect(right.preview.id).toBe(first.preview.id);
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count, MIN(status) AS status FROM preview_artifacts",
+            )
+            .get(),
+        ),
+      ).toEqual({ count: 1, status: "ready" });
+      expect(
+        (await fixture.storage.listForReconciliation()).durable,
+      ).toHaveLength(1);
+    } finally {
+      await secondStorage.close();
+      await secondDatabase.close();
       await fixture.storage.close();
       await fixture.database.close();
     }

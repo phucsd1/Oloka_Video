@@ -145,14 +145,15 @@ export function registerCompositionRoutes(
     "/api/v1/compositions/:compositionVersionId/validate",
     async (request, reply) => {
       const actor = verifyMutation(request);
+      const result = requireService().validate(
+        actor,
+        parameter(request, "compositionVersionId"),
+        idempotency(request),
+      );
       return reply
         .header("cache-control", "no-store")
-        .send(
-          requireService().validate(
-            actor,
-            parameter(request, "compositionVersionId"),
-          ),
-        );
+        .header("idempotency-replayed", result.replayed ? "true" : "false")
+        .send(result.validation);
     },
   );
 
@@ -256,7 +257,11 @@ async function sendContent(
   }
   const etag = `"${descriptor.preview.byteChecksumSha256}"`;
   if (reply.request.headers["if-none-match"] === etag)
-    return reply.code(304).header("etag", etag).send();
+    return reply
+      .code(304)
+      .header("content-security-policy", "sandbox allow-scripts")
+      .header("etag", etag)
+      .send();
   const range = parseRange(reply.request.headers.range, object.size);
   const response = reply
     .code(range.partial ? 206 : 200)
@@ -264,6 +269,7 @@ async function sendContent(
     .header("content-length", String(range.end - range.start + 1))
     .header("content-type", "text/html; charset=utf-8")
     .header("content-disposition", "inline; filename=preview.html")
+    .header("content-security-policy", "sandbox allow-scripts")
     .header("etag", etag)
     .header("last-modified", object.modifiedAt.toUTCString())
     .header("x-content-type-options", "nosniff")

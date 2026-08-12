@@ -174,6 +174,53 @@ describe("database migrations", () => {
     await database.close();
   });
 
+  it("qualifies the canonical Project foreign keys after migration v7", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-migration-v7-fk-"));
+    temporaryDirectories.push(directory);
+    const database = await SqliteSystemDatabase.connect(
+      pathToFileURL(join(directory, "database.sqlite")).href,
+    );
+
+    await database.migrate();
+
+    const evidence = database.transactions.run(
+      "read",
+      ({ database: connection }) => ({
+        compositionForeignKeys: connection
+          .prepare("PRAGMA foreign_key_list(composition_versions)")
+          .all(),
+        projectForeignKeys: connection
+          .prepare("PRAGMA foreign_key_list(projects)")
+          .all(),
+        legacyProject: connection
+          .prepare("SELECT type FROM sqlite_schema WHERE name = 'projects_v6'")
+          .get(),
+        foreignKeyFailures: connection
+          .prepare("PRAGMA foreign_key_check")
+          .all(),
+      }),
+    );
+    expect(evidence.compositionForeignKeys).toEqual(
+      expect.arrayContaining([expect.objectContaining({ table: "projects" })]),
+    );
+    expect(evidence.compositionForeignKeys).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: "projects_v6" }),
+      ]),
+    );
+    expect(evidence.projectForeignKeys).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          from: "current_composition_version_id",
+          table: "composition_versions",
+        }),
+      ]),
+    );
+    expect(evidence.legacyProject).toBeUndefined();
+    expect(evidence.foreignKeyFailures).toEqual([]);
+    await database.close();
+  });
+
   it("refuses to migrate an existing v1 database without an application key", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-migration-"));
     temporaryDirectories.push(directory);

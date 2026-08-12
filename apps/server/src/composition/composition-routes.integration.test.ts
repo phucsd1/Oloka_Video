@@ -100,8 +100,41 @@ describe("Composition HTTP routes", () => {
         headers: mutationHeaders,
         payload: {},
       });
-      expect(validated.statusCode, validated.body).toBe(200);
-      expect(validated.json()).toMatchObject({ schemaVersion: 1, valid: true });
+      expect(validated.statusCode).toBe(400);
+      expect(validated.json().error.code).toBe("VALIDATION_ERROR");
+      const validationHeaders = {
+        ...mutationHeaders,
+        "idempotency-key": "composition-route-validate",
+      };
+      const firstValidation = await fixture.app.inject({
+        method: "POST",
+        url: `/api/v1/compositions/${compositionId}/validate`,
+        headers: validationHeaders,
+        payload: {},
+      });
+      expect(firstValidation.statusCode, firstValidation.body).toBe(200);
+      expect(firstValidation.headers["idempotency-replayed"]).toBe("false");
+      expect(firstValidation.json()).toMatchObject({
+        schemaVersion: 1,
+        valid: true,
+      });
+      const validationReplay = await fixture.app.inject({
+        method: "POST",
+        url: `/api/v1/compositions/${compositionId}/validate`,
+        headers: validationHeaders,
+        payload: {},
+      });
+      expect(validationReplay.statusCode, validationReplay.body).toBe(200);
+      expect(validationReplay.headers["idempotency-replayed"]).toBe("true");
+      expect(
+        fixture.database.transactions.run("read", ({ database }) =>
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'composition.validate'",
+            )
+            .get(),
+        ),
+      ).toEqual({ count: 1 });
 
       const derived = await fixture.app.inject({
         method: "POST",
@@ -153,6 +186,9 @@ describe("Composition HTTP routes", () => {
       expect(head.statusCode).toBe(200);
       expect(Number(head.headers["content-length"])).toBeGreaterThan(2_000_000);
       expect(head.headers["x-content-type-options"]).toBe("nosniff");
+      expect(head.headers["content-security-policy"]).toBe(
+        "sandbox allow-scripts",
+      );
       const range = await fixture.app.inject({
         method: "GET",
         url: `/api/v1/previews/${previewId}/content`,
@@ -161,6 +197,9 @@ describe("Composition HTTP routes", () => {
       expect(range.statusCode).toBe(206);
       expect(range.rawPayload.byteLength).toBe(128);
       expect(range.headers["content-range"]).toMatch(/^bytes 0-127\//);
+      expect(range.headers["content-security-policy"]).toBe(
+        "sandbox allow-scripts",
+      );
       const conditional = await fixture.app.inject({
         method: "GET",
         url: `/api/v1/previews/${previewId}/content`,
@@ -170,6 +209,9 @@ describe("Composition HTTP routes", () => {
         },
       });
       expect(conditional.statusCode).toBe(304);
+      expect(conditional.headers["content-security-policy"]).toBe(
+        "sandbox allow-scripts",
+      );
       const invalidRange = await fixture.app.inject({
         method: "GET",
         url: `/api/v1/previews/${previewId}/content`,

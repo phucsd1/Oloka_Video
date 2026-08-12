@@ -394,7 +394,11 @@ seed_composition_preview_state() {
       };
       const created = service.create(actor, project.id, { document, expectedProjectVersion: project.version }, "docker-recovery-composition-create");
       const preview = await service.requestPreview(actor, created.composition.id, "docker-recovery-preview");
-      database.transactions.run("immediate", ({ database }) => database.prepare("INSERT OR REPLACE INTO system_metadata (key, value_json, updated_at, version) VALUES (?, ?, ?, COALESCE((SELECT version FROM system_metadata WHERE key = ?), 0) + 1)").run("recovery.composition.evidence", JSON.stringify({ compositionId: created.composition.id, previewId: preview.preview.id, fingerprint: preview.preview.renderContractFingerprintSha256, byteChecksum: preview.preview.byteChecksumSha256 }), 1700000000000, "recovery.composition.evidence"));
+      database.transactions.run("immediate", ({ database }) => {
+        const core = database.prepare("SELECT materializer_version, hyperframes_version, csp_profile_version, storage_key, created_at FROM preview_artifacts WHERE id = ?").get(preview.preview.id);
+        database.prepare("UPDATE preview_artifacts SET status = ? WHERE id = ?").run("purge_scheduled", preview.preview.id);
+        database.prepare("INSERT OR REPLACE INTO system_metadata (key, value_json, updated_at, version) VALUES (?, ?, ?, COALESCE((SELECT version FROM system_metadata WHERE key = ?), 0) + 1)").run("recovery.composition.evidence", JSON.stringify({ compositionId: created.composition.id, canonicalHash: created.composition.canonicalHashSha256, previewId: preview.preview.id, fingerprint: preview.preview.renderContractFingerprintSha256, byteChecksum: preview.preview.byteChecksumSha256, ...core }), 1700000000000, "recovery.composition.evidence");
+      });
     } finally { await storage.close(); await database.close(); }
   '
 }
@@ -656,9 +660,10 @@ inspect_database() {
       const identities = db.prepare("SELECT id, user_id, issuer, email_verified FROM oauth_identities ORDER BY id").all();
       const sessions = db.prepare("SELECT id, user_id, status, revoke_reason FROM sessions ORDER BY id").all();
       const projects = db.prepare("SELECT id, owner_user_id, name, favorite, status, version, deleted_at, purge_after FROM projects ORDER BY id").all();
-      const compositions = db.prepare("SELECT id, project_id, version_number, canonical_hash_sha256, status FROM composition_versions ORDER BY id").all();
+      const compositions = db.prepare("SELECT id, project_id, version_number, canonical_hash_sha256, semantic_request_hash_sha256, composition_json, validation_json, status FROM composition_versions ORDER BY id").all();
       const compositionRefs = db.prepare("SELECT composition_version_id, asset_id, usage FROM composition_asset_references ORDER BY composition_version_id, asset_id, usage").all();
-      const previews = db.prepare("SELECT id, composition_version_id, render_contract_fingerprint_sha256, byte_checksum_sha256, status FROM preview_artifacts ORDER BY id").all();
+      const previews = db.prepare("SELECT id, composition_version_id, render_contract_fingerprint_sha256, materializer_version, hyperframes_version, csp_profile_version, storage_key, byte_checksum_sha256, status, created_at FROM preview_artifacts ORDER BY id").all();
+      const previewPurgeAudits = db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = ?").get("preview.purged").count;
       const assets = db.prepare("SELECT id, project_id, owner_user_id, byte_size, byte_checksum_sha256, ingestion_status, lifecycle_status FROM assets ORDER BY id").all();
       const jobs = db.prepare("SELECT id, type, status, owner_user_id, progress_basis_points, attempt_count, lease_owner, lease_expires_at, version FROM jobs ORDER BY id").all();
       const steps = db.prepare("SELECT id, job_id, status, attempt_count, lease_owner, lease_expires_at, version FROM job_steps ORDER BY id").all();
@@ -666,7 +671,7 @@ inspect_database() {
       const outboxBacklog = db.prepare("SELECT status, attempt_count, last_error_code FROM outbox_events WHERE id = ?").get("00000000-0000-4000-8000-000000000205");
       const compositionEvidence = db.prepare("SELECT value_json, version FROM system_metadata WHERE key = ?").get("recovery.composition.evidence");
       db.close();
-      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, users, identities, sessions, projects, compositions, compositionRefs, previews, assets, jobs, steps, jobEvents, outboxBacklog, metadataVersion: metadata.version, compositionEvidenceVersion: compositionEvidence?.version ?? null, compositionEvidence: compositionEvidence ? JSON.parse(compositionEvidence.value_json) : null, witness: JSON.parse(metadata.value_json) }));
+      process.stdout.write(JSON.stringify({ quickCheck, foreignKeyFailures, ledger, coreTables, litestreamTables, users, identities, sessions, projects, compositions, compositionRefs, previews, previewPurgeAudits, assets, jobs, steps, jobEvents, outboxBacklog, metadataVersion: metadata.version, compositionEvidenceVersion: compositionEvidence?.version ?? null, compositionEvidence: compositionEvidence ? JSON.parse(compositionEvidence.value_json) : null, witness: JSON.parse(metadata.value_json) }));
     '
 }
 
@@ -764,9 +769,9 @@ for boot in 1 2 3; do
       (boot === 1 ? d.jobs[0].status === "running" && d.jobs[0].attempt_count === 1 && d.jobs[0].lease_owner === "worker-A" && d.assets[0].ingestion_status === "processing" :
         d.jobs[0].status === "completed" && d.jobs[0].progress_basis_points === 10000 && d.jobs[0].attempt_count === 2 && d.steps[0].status === "completed" && d.assets[0].ingestion_status === "ready") &&
       (boot === 1 ? d.jobEvents[0].sequences === "1,2,3" : d.jobEvents[0].max_sequence >= 8) &&
-      d.compositions.length === 1 && d.compositions[0].version_number === 1 && d.compositions[0].status === "valid" &&
-      d.compositionRefs.length === 0 && d.previews.length === 1 && d.previews[0].status === "ready" &&
-      d.compositionEvidence !== null && d.compositionEvidence.compositionId === d.compositions[0].id && d.compositionEvidence.previewId === d.previews[0].id && d.compositionEvidence.byteChecksum === d.previews[0].byte_checksum_sha256;
+      d.compositions.length === 1 && d.compositions[0].version_number === 1 && d.compositions[0].status === "valid" && d.compositions[0].semantic_request_hash_sha256 === null &&
+      d.compositionRefs.length === 0 && d.previews.length === 1 && d.previews[0].status === (boot === 1 ? "purge_scheduled" : "purged") && d.previewPurgeAudits === (boot === 1 ? 0 : 1) &&
+      d.compositionEvidence !== null && d.compositionEvidence.compositionId === d.compositions[0].id && d.compositionEvidence.canonicalHash === d.compositions[0].canonical_hash_sha256 && d.compositionEvidence.previewId === d.previews[0].id && d.compositionEvidence.fingerprint === d.previews[0].render_contract_fingerprint_sha256 && d.compositionEvidence.byteChecksum === d.previews[0].byte_checksum_sha256 && d.compositionEvidence.materializer_version === d.previews[0].materializer_version && d.compositionEvidence.hyperframes_version === d.previews[0].hyperframes_version && d.compositionEvidence.csp_profile_version === d.previews[0].csp_profile_version && d.compositionEvidence.storage_key === d.previews[0].storage_key && d.compositionEvidence.created_at === d.previews[0].created_at;
     if (!valid) process.exit(1);
   ' "$boot" <<<"$evidence"
   if [ "$boot" -eq 1 ]; then
@@ -778,7 +783,7 @@ for boot in 1 2 3; do
   fi
   if [ "$boot" -eq 2 ]; then terminal_event_sequences="$current_job_sequences"; fi
   if [ "$boot" -eq 3 ]; then test "$current_job_sequences" = "$terminal_event_sequences"; fi
-  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4,5,6,7 project_persistence=pass composition_persistence=pass preview_persistence=pass identity_persistence=pass job_persistence=pass outbox_backlog_status=$(docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(d.outboxBacklog.status)' <<<"$evidence") event_sequences=$current_job_sequences replica_objects=$boot_replica_objects restore_seconds=$restore_duration restore_bound_seconds=120 quick_check=ok foreign_keys=0"
+  echo "boot=$boot startup_count=$startup_count first_started_at=$current_first_started_at ledger_versions=1,2,3,4,5,6,7 project_persistence=pass composition_persistence=pass preview_retention_restart=pass preview_immutable_core=pass identity_persistence=pass job_persistence=pass outbox_backlog_status=$(docker run --rm -i --entrypoint node "$image" --input-type=commonjs -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(d.outboxBacklog.status)' <<<"$evidence") event_sequences=$current_job_sequences replica_objects=$boot_replica_objects restore_seconds=$restore_duration restore_bound_seconds=120 quick_check=ok foreign_keys=0"
   docker rm "$container" >/dev/null
   docker volume rm "$local_volume" >/dev/null
 done

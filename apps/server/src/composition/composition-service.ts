@@ -49,10 +49,13 @@ import {
   MATERIALIZER_VERSION,
   resolveCompositionManifests,
 } from "./composition-manifests.js";
+import {
+  assertPreviewEmbeddedAssetBudgetV1,
+  MAX_PREVIEW_EMBEDDED_ASSET_BYTES_V1,
+} from "./preview-materialization-policy.js";
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const PREVIEW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_EMBEDDED_PREVIEW_BYTES = 16 * 1024 * 1024;
 
 export interface CompositionServiceOptions {
   transactions: TransactionRunner;
@@ -197,8 +200,78 @@ export class CompositionService {
     });
   }
 
-  validate(actor: AuthenticatedSession, compositionVersionId: string) {
-    return this.get(actor, compositionVersionId).validation;
+  validate(
+    actor: AuthenticatedSession,
+    compositionVersionId: string,
+    idempotencyKey: string,
+  ) {
+    const now = this.options.clock.now();
+    return this.options.transactions.run("immediate", (context) => {
+      const row = this.compositions.getOwned(
+        context,
+        compositionVersionId,
+        actor.user.id,
+      );
+      if (row === null)
+        throw new ApplicationError(
+          "RESOURCE_NOT_FOUND",
+          "composition_not_found",
+        );
+      const semanticRequestHashSha256 = sha256CanonicalJson({
+        compositionVersionId,
+        canonicalHashSha256: row.canonical_hash_sha256,
+      });
+      const begin = this.idempotency.begin(context, {
+        userId: actor.user.id,
+        operation: "composition.validate",
+        idempotencyKey,
+        semanticRequestHashSha256,
+        createdAt: now,
+        expiresAt: now + IDEMPOTENCY_TTL_MS,
+      });
+      if (begin.kind === "replay")
+        return {
+          validation: begin.response,
+          replayed: true,
+        };
+      if (begin.kind !== "started" && begin.kind !== "retryable")
+        throw this.idempotencyError(begin.kind);
+      const project = this.projects.getById(context, row.project_id);
+      if (project === null || project.status !== "active")
+        throw new ApplicationError(
+          "RESOURCE_STATE_CONFLICT",
+          "project_not_active",
+        );
+      const document = parseCompositionDocument(row);
+      if (sha256Hex(canonicalizeJson(document)) !== row.canonical_hash_sha256)
+        throw new ApplicationError(
+          "COMPOSITION_INVALID",
+          "composition_canonical_hash_mismatch",
+        );
+      this.resolveDocument(context, actor, project.id, document);
+      const validation = {
+        schemaVersion: 1 as const,
+        valid: true,
+        issues: [],
+      };
+      this.audit.append(context, {
+        actorUserId: actor.user.id,
+        actorType: actor.user.role === "admin" ? "admin" : "user",
+        action: "composition.validate",
+        resourceType: "composition",
+        resourceId: row.id,
+        outcome: "success",
+        metadata: { projectId: row.project_id },
+        createdAt: now,
+      });
+      this.idempotency.complete(context, {
+        recordId: begin.recordId,
+        responseStatus: 200,
+        response: validation,
+        resourceId: row.id,
+      });
+      return { validation, replayed: false };
+    });
   }
 
   async requestPreview(
@@ -280,8 +353,21 @@ export class CompositionService {
           cspProfileVersion: CSP_PROFILE_VERSION,
         }),
       );
-      if (existing !== null)
-        return this.completePreviewReplay(begin.recordId, existing, false);
+      if (existing !== null) {
+        if (existing.status === "ready")
+          return this.completePreviewReplay(begin.recordId, existing, false);
+        if (existing.status === "purged")
+          return await this.rehydratePreview(
+            begin.recordId,
+            existing,
+            materialized.bytes,
+            materialized.checksumSha256,
+          );
+        throw new ApplicationError(
+          "RESOURCE_STATE_CONFLICT",
+          "preview_identity_not_ready",
+        );
+      }
 
       const objectId = this.options.idGenerator.generate();
       const generatedStagingKey = this.options.idGenerator.generate();
@@ -460,12 +546,6 @@ export class CompositionService {
         ...(parentVersionId === null ? {} : { parentVersionId }),
         document: resolution.document,
         canonicalHashSha256,
-        semanticRequestHashSha256: sha256CanonicalJson({
-          operation,
-          projectId,
-          parentVersionId,
-          expectedProjectVersion,
-        }),
         status: "valid",
         validation,
         createdAt: now,
@@ -544,11 +624,7 @@ export class CompositionService {
     assets: ReturnType<typeof resolveCompositionManifests>["assets"],
   ) {
     const total = assets.reduce((sum, asset) => sum + asset.byteSize, 0);
-    if (total > MAX_EMBEDDED_PREVIEW_BYTES)
-      throw new ApplicationError(
-        "PAYLOAD_TOO_LARGE",
-        "preview_embedded_media_limit",
-      );
+    assertPreviewEmbeddedAssetBudgetV1(total);
     return Promise.all(
       assets.map(async (asset) => {
         const stream = await this.options.storage.openRange(
@@ -563,7 +639,7 @@ export class CompositionService {
         >) {
           const bytes = Buffer.from(chunk);
           length += bytes.length;
-          if (length > MAX_EMBEDDED_PREVIEW_BYTES)
+          if (length > MAX_PREVIEW_EMBEDDED_ASSET_BYTES_V1)
             throw new ApplicationError(
               "PAYLOAD_TOO_LARGE",
               "preview_embedded_media_limit",
@@ -599,6 +675,64 @@ export class CompositionService {
       }),
     );
     return { preview, replayed };
+  }
+
+  private async rehydratePreview(
+    recordId: string,
+    row: PreviewArtifactRow,
+    bytes: Uint8Array,
+    checksumSha256: string,
+  ) {
+    if (checksumSha256 !== row.byte_checksum_sha256) {
+      this.options.transactions.run("immediate", (context) =>
+        this.previews.quarantine(context, row.id),
+      );
+      throw new ApplicationError(
+        "CHECKSUM_MISMATCH",
+        "preview_rehydration_checksum_mismatch",
+      );
+    }
+    const stagingKey = this.options.idGenerator.generate();
+    try {
+      await this.options.storage.stage(stagingKey);
+      await this.options.storage.appendAtOffset(stagingKey, 0, bytes);
+      if (
+        (await this.options.storage.createStagingHash(stagingKey)) !==
+        row.byte_checksum_sha256
+      )
+        throw new ApplicationError(
+          "CHECKSUM_MISMATCH",
+          "preview_rehydration_staging_checksum_mismatch",
+        );
+      try {
+        await this.options.storage.finalize(stagingKey, row.storage_key);
+      } catch (error) {
+        await this.options.storage.delete("staging", stagingKey);
+        if (
+          (await this.options.storage
+            .createHash(row.storage_key)
+            .catch(() => null)) !== row.byte_checksum_sha256
+        )
+          throw error;
+      }
+      const now = this.options.clock.now();
+      const current = this.options.transactions.run("immediate", (context) => {
+        this.previews.markRehydrated(context, {
+          id: row.id,
+          purgeAfter: now + PREVIEW_RETENTION_MS,
+        });
+        const refreshed = this.previews.getById(context, row.id);
+        if (refreshed === null || refreshed.status !== "ready")
+          throw new Error("Preview rehydration state conflict");
+        return refreshed;
+      });
+      return this.completePreviewReplay(recordId, current, false);
+    } catch (error) {
+      await this.options.storage
+        .delete("staging", stagingKey)
+        .catch(() => undefined);
+      throw error;
+    }
   }
 
   private idempotencyError(kind: "conflict" | "in_progress"): ApplicationError {

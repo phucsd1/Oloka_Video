@@ -4,6 +4,10 @@
 
 Each valid immutable `CompositionVersion` maps through one shared trusted materializer to an immutable, checksum-addressed preview artifact. An authorized preview bootstrap loads that artifact into a sandboxed iframe/player. Preview and render consume the same structured document, asset checksums, registry versions, materializer, timing semantics, fonts, and layout presets.
 
+## Technical preview materialization budget
+
+Phase 3F applies a fixed preview-only materialization budget of 16 MiB (`16 * 1024 * 1024`) for the total raw bytes embedded from referenced Assets. The service sums authoritative database sizes before opening any Asset stream and rejects larger previews with `PAYLOAD_TOO_LARGE`. This budget protects the immutable preview path; it is not an upload admission rule. Asset upload admission remains governed by the private-asset policy and its 500 MB maximum.
+
 ```mermaid
 flowchart LR
   V["Immutable CompositionVersion"] --> G["Validate references and schema"]
