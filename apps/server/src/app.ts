@@ -56,7 +56,10 @@ import { createPhase3EOutboxHandlerRegistry } from "./outbox/phase3e-handlers.js
 import { CompositionService } from "./composition/composition-service.js";
 import { registerCompositionRoutes } from "./composition/composition-routes.js";
 import { PreviewArtifactMaintenanceService } from "./composition/preview-artifact-maintenance-service.js";
-import { PreviewArtifactMaintenanceRuntime } from "./composition/preview-artifact-maintenance-runtime.js";
+import {
+  PreviewArtifactMaintenanceRuntime,
+  PreviewMaintenanceShutdownTimeoutError,
+} from "./composition/preview-artifact-maintenance-runtime.js";
 
 export interface BuildApplicationOptions {
   environment: AppEnvironment;
@@ -241,9 +244,13 @@ export async function buildApplication(
           "preview retention maintenance failed",
         );
       },
-      onShutdownTimeout: () => {
+      onShutdownTimeout: ({ graceMs, activePass }) => {
         app.log.error(
-          { event: "preview.maintenance.shutdown_timeout" },
+          {
+            event: "preview.maintenance.shutdown_timeout",
+            graceMs,
+            activePass,
+          },
           "preview retention maintenance exceeded shutdown grace",
         );
       },
@@ -409,13 +416,42 @@ export async function buildApplication(
     });
   }
 
+  let sharedResourceClose: Promise<void> | undefined;
+  const closeSharedResources = (): Promise<void> => {
+    sharedResourceClose ??= (async () => {
+      await outboxRuntime?.stop();
+      await jobDispatcher?.stop();
+      await Promise.all([storage.close(), database.close()]);
+    })();
+    return sharedResourceClose;
+  };
+
   app.addHook("onClose", async () => {
     clearInterval(identityMaintenanceInterval);
     clearInterval(assetMaintenanceInterval);
-    await previewMaintenanceRuntime.stop();
-    await outboxRuntime?.stop();
-    await jobDispatcher?.stop();
-    await Promise.all([storage.close(), database.close()]);
+    try {
+      await previewMaintenanceRuntime.stop();
+    } catch (error) {
+      if (error instanceof PreviewMaintenanceShutdownTimeoutError) {
+        void error
+          .waitForSettlement()
+          .then(closeSharedResources)
+          .catch((cleanupError: unknown) => {
+            app.log.error(
+              {
+                event: "application.deferred_shutdown.failed",
+                errorType:
+                  cleanupError instanceof Error
+                    ? cleanupError.name
+                    : "UnknownError",
+              },
+              "deferred application shutdown failed",
+            );
+          });
+      }
+      throw error;
+    }
+    await closeSharedResources();
   });
 
   metrics.observe("startup", performance.now() - startupStartedAt);

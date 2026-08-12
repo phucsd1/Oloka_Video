@@ -28,6 +28,9 @@ describe("Preview maintenance application lifecycle", () => {
       LOG_LEVEL: "silent",
     });
     let calls = 0;
+    let storageClosed = false;
+    let postCloseDatabaseAccess = 0;
+    let postCloseStorageAccess = 0;
     let release: (() => void) | undefined;
     let activeStarted: (() => void) | undefined;
     const active = new Promise<void>((resolve) => {
@@ -46,15 +49,38 @@ describe("Preview maintenance application lifecycle", () => {
         pollIntervalMs: 5,
         serviceFactory: (dependencies) => {
           transactions = dependencies.transactions;
+          const closeStorage = dependencies.storage.close.bind(
+            dependencies.storage,
+          );
+          dependencies.storage.close = async () => {
+            storageClosed = true;
+            await closeStorage();
+          };
           return {
             run: vi.fn(async () => {
               calls += 1;
-              dependencies.transactions.run("read", () => undefined);
+              try {
+                dependencies.transactions.run("read", () => undefined);
+              } catch (error) {
+                postCloseDatabaseAccess += 1;
+                throw error;
+              }
               if (calls === 1) return { scheduled: 0, purged: 0, failed: 0 };
               activeStarted?.();
               await blocked;
-              dependencies.transactions.run("read", () => undefined);
-              await dependencies.storage.checkReadiness();
+              try {
+                dependencies.transactions.run("read", () => undefined);
+              } catch (error) {
+                postCloseDatabaseAccess += 1;
+                throw error;
+              }
+              try {
+                if (storageClosed) postCloseStorageAccess += 1;
+                await dependencies.storage.checkReadiness();
+              } catch (error) {
+                postCloseStorageAccess += 1;
+                throw error;
+              }
               return { scheduled: 0, purged: 0, failed: 0 };
             }),
           };
@@ -75,6 +101,107 @@ describe("Preview maintenance application lifecycle", () => {
     await close;
     expect(closed).toBe(true);
     expect(() => transactions?.run("read", () => undefined)).toThrow();
+    expect(postCloseDatabaseAccess).toBe(0);
+    expect(postCloseStorageAccess).toBe(0);
+    const callsAtClose = calls;
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(callsAtClose);
+  });
+
+  it("fails closed on timeout and closes resources only after the pass settles", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "oloka-preview-timeout-"));
+    temporaryDirectories.push(directory);
+    const environment = parseEnvironment({
+      NODE_ENV: "test",
+      OBJECT_STORAGE_ROOT: join(directory, "objects"),
+      DATABASE_PATH: join(directory, "database", "test.db"),
+      OLOKA_DATABASE_BOOTSTRAP_MODE: "fresh-if-replica-missing",
+      OLOKA_APP_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      LOG_LEVEL: "silent",
+    });
+    let calls = 0;
+    let release: (() => void) | undefined;
+    let activeStarted: (() => void) | undefined;
+    const active = new Promise<void>((resolve) => {
+      activeStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let postCloseDatabaseAccess = 0;
+    let postCloseStorageAccess = 0;
+    let storageClosed = false;
+    let storageCloseCount = 0;
+    let transactions:
+      | import("../database/database.js").TransactionRunner
+      | undefined;
+    let storage:
+      | import("../storage/object-storage.js").ObjectStorage
+      | undefined;
+    const app = await buildApplication({
+      environment,
+      serveFrontend: false,
+      previewMaintenance: {
+        pollIntervalMs: 5,
+        shutdownGraceMs: 10,
+        serviceFactory: (dependencies) => {
+          transactions = dependencies.transactions;
+          storage = dependencies.storage;
+          const closeStorage = dependencies.storage.close.bind(
+            dependencies.storage,
+          );
+          dependencies.storage.close = async () => {
+            storageCloseCount += 1;
+            storageClosed = true;
+            await closeStorage();
+          };
+          return {
+            run: vi.fn(async () => {
+              calls += 1;
+              if (calls === 1) return { scheduled: 0, purged: 0, failed: 0 };
+              dependencies.transactions.run("read", () => undefined);
+              await dependencies.storage.checkReadiness();
+              activeStarted?.();
+              await blocked;
+              try {
+                dependencies.transactions.run("read", () => undefined);
+              } catch (error) {
+                postCloseDatabaseAccess += 1;
+                throw error;
+              }
+              try {
+                if (storageClosed) postCloseStorageAccess += 1;
+                await dependencies.storage.checkReadiness();
+              } catch (error) {
+                postCloseStorageAccess += 1;
+                throw error;
+              }
+              return { scheduled: 0, purged: 0, failed: 0 };
+            }),
+          };
+        },
+      },
+    });
+
+    await active;
+    await expect(app.close()).rejects.toMatchObject({
+      name: "PreviewMaintenanceShutdownTimeoutError",
+    });
+    expect(() => transactions?.run("read", () => undefined)).not.toThrow();
+    expect(storageCloseCount).toBe(0);
+    expect(storageClosed).toBe(false);
+    await expect(storage?.checkReadiness()).resolves.toMatchObject({
+      status: "ready",
+    });
+
+    release?.();
+    await vi.waitFor(() =>
+      expect(() => transactions?.run("read", () => undefined)).toThrow(),
+    );
+    await app.close();
+    expect(postCloseDatabaseAccess).toBe(0);
+    expect(postCloseStorageAccess).toBe(0);
+    expect(storageCloseCount).toBe(1);
     const callsAtClose = calls;
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
     expect(calls).toBe(callsAtClose);

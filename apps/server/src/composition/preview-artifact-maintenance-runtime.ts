@@ -3,18 +3,35 @@ import type { PreviewArtifactMaintenanceService } from "./preview-artifact-maint
 
 const DEFAULT_PREVIEW_MAINTENANCE_SHUTDOWN_GRACE_MS = 5_000;
 
+export class PreviewMaintenanceShutdownTimeoutError extends Error {
+  readonly activePass = true;
+
+  constructor(
+    readonly graceMs: number,
+    private readonly settlement: Promise<void>,
+  ) {
+    super("Preview maintenance did not settle within shutdown grace");
+    this.name = "PreviewMaintenanceShutdownTimeoutError";
+  }
+
+  waitForSettlement(): Promise<void> {
+    return this.settlement;
+  }
+}
+
 export interface PreviewArtifactMaintenanceRuntimeOptions {
   pollIntervalMs: number;
   clock: Clock;
   shutdownGraceMs?: number;
   onError?: (error: unknown) => void;
-  onShutdownTimeout?: () => void;
+  onShutdownTimeout?: (event: { graceMs: number; activePass: true }) => void;
 }
 
 export class PreviewArtifactMaintenanceRuntime {
   private timer: NodeJS.Timeout | undefined;
   private inFlight: Promise<void> | undefined;
   private stopping = false;
+  private stopPromise: Promise<void> | undefined;
 
   constructor(
     private readonly service: Pick<PreviewArtifactMaintenanceService, "run">,
@@ -46,24 +63,38 @@ export class PreviewArtifactMaintenanceRuntime {
     return pass;
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopPromise !== undefined) return this.stopPromise;
     this.stopping = true;
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
+    this.stopPromise = this.settleActivePass();
+    return this.stopPromise;
+  }
+
+  private async settleActivePass(): Promise<void> {
     const inFlight = this.inFlight;
     if (inFlight === undefined) return;
     const graceMs =
       this.options.shutdownGraceMs ??
       DEFAULT_PREVIEW_MAINTENANCE_SHUTDOWN_GRACE_MS;
+    let timeout: NodeJS.Timeout | undefined;
     const settled = await Promise.race([
       inFlight.then(() => true),
       new Promise<false>((resolve) => {
-        const timeout = setTimeout(() => resolve(false), graceMs);
+        timeout = setTimeout(() => resolve(false), graceMs);
         timeout.unref();
       }),
-    ]);
+    ]).finally(() => {
+      if (timeout !== undefined) clearTimeout(timeout);
+    });
     if (!settled) {
-      this.options.onShutdownTimeout?.();
+      const error = new PreviewMaintenanceShutdownTimeoutError(
+        graceMs,
+        inFlight,
+      );
+      this.options.onShutdownTimeout?.({ graceMs, activePass: true });
+      throw error;
     }
   }
 

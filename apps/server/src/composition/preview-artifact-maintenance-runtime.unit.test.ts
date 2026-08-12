@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PreviewArtifactMaintenanceRuntime } from "./preview-artifact-maintenance-runtime.js";
+import {
+  PreviewArtifactMaintenanceRuntime,
+  PreviewMaintenanceShutdownTimeoutError,
+} from "./preview-artifact-maintenance-runtime.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -95,8 +98,14 @@ describe("PreviewArtifactMaintenanceRuntime", () => {
 
   it("bounds shutdown without pretending a blocked pass settled", async () => {
     vi.useFakeTimers();
+    let release: (() => void) | undefined;
     const service = {
-      run: vi.fn(() => new Promise<never>(() => undefined)),
+      run: vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { scheduled: 0, purged: 0, failed: 0 };
+      }),
     };
     const onShutdownTimeout = vi.fn();
     const runtime = new PreviewArtifactMaintenanceRuntime(service, {
@@ -108,10 +117,34 @@ describe("PreviewArtifactMaintenanceRuntime", () => {
     void runtime.start();
     await vi.waitFor(() => expect(service.run).toHaveBeenCalledTimes(1));
 
-    const stopExpectation = runtime.stop();
+    const firstStop = runtime.stop();
+    const secondStop = runtime.stop();
+    const firstResult = firstStop.catch((error: unknown) => error);
+    const secondResult = secondStop.catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(25);
-    await stopExpectation;
+    const [firstError, secondError] = await Promise.all([
+      firstResult,
+      secondResult,
+    ]);
+    expect(firstError).toBeInstanceOf(PreviewMaintenanceShutdownTimeoutError);
+    expect(secondError).toBe(firstError);
+    expect(onShutdownTimeout).toHaveBeenCalledTimes(1);
+    expect(onShutdownTimeout).toHaveBeenCalledWith({
+      graceMs: 25,
+      activePass: true,
+    });
+    expect(service.run).toHaveBeenCalledTimes(1);
+    await expect(runtime.stop()).rejects.toBe(firstError);
     expect(onShutdownTimeout).toHaveBeenCalledTimes(1);
     expect(service.run).toHaveBeenCalledTimes(1);
+
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(
+      (
+        firstError as PreviewMaintenanceShutdownTimeoutError
+      ).waitForSettlement(),
+    ).resolves.toBeUndefined();
+    await expect(runtime.stop()).rejects.toBe(firstError);
   });
 });
