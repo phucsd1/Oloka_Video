@@ -328,8 +328,10 @@ export class CompositionService {
     let stagingKey: string | undefined;
     let storageKey: string | undefined;
     let persisted = false;
+    let previewStage = "load-assets";
     try {
       const assets = await this.loadAssetBytes(input.assets);
+      previewStage = "materialize";
       const materialized = await materializeCompositionPreview(
         input.document,
         assets,
@@ -374,12 +376,14 @@ export class CompositionService {
       const generatedStorageKey = `v1/${objectId.slice(0, 2)}/${objectId}`;
       stagingKey = generatedStagingKey;
       storageKey = generatedStorageKey;
+      previewStage = "stage";
       await this.options.storage.stage(generatedStagingKey);
       await this.options.storage.appendAtOffset(
         generatedStagingKey,
         0,
         materialized.bytes,
       );
+      previewStage = "hash-staging";
       if (
         (await this.options.storage.createStagingHash(generatedStagingKey)) !==
         materialized.checksumSha256
@@ -388,10 +392,12 @@ export class CompositionService {
           "CHECKSUM_MISMATCH",
           "preview_staging_checksum_mismatch",
         );
+      previewStage = "finalize";
       await this.options.storage.finalize(
         generatedStagingKey,
         generatedStorageKey,
       );
+      previewStage = "persist";
       const now = this.options.clock.now();
       let row: PreviewArtifactRow;
       try {
@@ -439,8 +445,15 @@ export class CompositionService {
         storageKey = undefined;
         row = winner;
       }
+      previewStage = "complete";
       return this.completePreviewReplay(begin.recordId, row, false);
     } catch (error) {
+      if (typeof error === "object" && error !== null) {
+        Object.defineProperty(error, "previewStage", {
+          value: previewStage,
+          enumerable: false,
+        });
+      }
       await Promise.allSettled([
         ...(stagingKey === undefined
           ? []

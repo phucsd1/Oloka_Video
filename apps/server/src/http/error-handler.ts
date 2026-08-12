@@ -23,6 +23,7 @@ export function registerErrorHandler(app: FastifyInstance): void {
           errorType: error instanceof Error ? error.name : "UnknownError",
           errorCode: readErrorCode(error),
           errorSyscall: readErrorSyscall(error),
+          previewStage: readPreviewStage(error),
         },
         "request failed",
       );
@@ -51,6 +52,12 @@ function readErrorSyscall(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const syscall = (error as { syscall?: unknown }).syscall;
   return typeof syscall === "string" ? syscall : undefined;
+}
+
+function readPreviewStage(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const stage = (error as { previewStage?: unknown }).previewStage;
+  return typeof stage === "string" ? stage : undefined;
 }
 
 function normalizeApplicationError(error: unknown): ApplicationError {
