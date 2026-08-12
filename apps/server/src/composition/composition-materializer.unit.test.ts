@@ -13,7 +13,9 @@ describe("composition preview materializer", () => {
     });
 
     expect(readMaterializationStage(error)).toBe("load-font");
-    expect(readMaterializationStage({ materializationStage: "private/path" })).toBeUndefined();
+    expect(
+      readMaterializationStage({ materializationStage: "private/path" }),
+    ).toBeUndefined();
   });
 
   it("produces identical self-contained bytes for the full structured fixture", async () => {
