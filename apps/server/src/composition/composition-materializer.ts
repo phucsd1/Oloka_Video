@@ -20,41 +20,72 @@ export interface MaterializedComposition {
   checksumSha256: string;
 }
 
+const MATERIALIZATION_STAGES = [
+  "load-runtime",
+  "load-font",
+  "encode-assets",
+  "build-style",
+  "build-markup",
+  "build-script",
+  "build-csp",
+  "encode-html",
+] as const;
+type MaterializationStage = (typeof MATERIALIZATION_STAGES)[number];
+
+export function readMaterializationStage(
+  error: unknown,
+): MaterializationStage | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const stage = (error as { materializationStage?: unknown })
+    .materializationStage;
+  return typeof stage === "string" &&
+    MATERIALIZATION_STAGES.includes(stage as MaterializationStage)
+    ? (stage as MaterializationStage)
+    : undefined;
+}
+
 export async function materializeCompositionPreview(
   document: CompositionDocumentV1,
   assets: MaterializedAssetBytes[],
 ): Promise<MaterializedComposition> {
-  const [runtimeSource, fontDataUrl] = await Promise.all([
-    loadRuntimeSource(),
-    loadFontDataUrl(),
-  ]);
-  const dataUrls = Object.fromEntries(
-    [...assets]
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map((asset) => [
-        asset.id,
-        `data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`,
-      ]),
-  );
-  const style = buildStyle(document, fontDataUrl);
-  const markup = buildMarkup(document, dataUrls);
-  const compositionScript = buildCompositionScript(document);
-  const wrapperScript = buildPreviewWrapperScript();
-  const csp = [
-    "default-src 'none'",
-    `script-src ${[wrapperScript, compositionScript, runtimeSource].map(cspHash).join(" ")}`,
-    `style-src ${cspHash(style)}`,
-    "img-src data: blob:",
-    "media-src data: blob:",
-    "font-src data:",
-    "connect-src 'none'",
-    "object-src 'none'",
-    "frame-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "navigate-to 'none'",
-  ].join("; ");
-  const html = `<!doctype html>
+  let stage: MaterializationStage = "load-runtime";
+  try {
+    const runtimeSource = await loadRuntimeSource();
+    stage = "load-font";
+    const fontDataUrl = await loadFontDataUrl();
+    stage = "encode-assets";
+    const dataUrls = Object.fromEntries(
+      [...assets]
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map((asset) => [
+          asset.id,
+          `data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`,
+        ]),
+    );
+    stage = "build-style";
+    const style = buildStyle(document, fontDataUrl);
+    stage = "build-markup";
+    const markup = buildMarkup(document, dataUrls);
+    stage = "build-script";
+    const compositionScript = buildCompositionScript(document);
+    const wrapperScript = buildPreviewWrapperScript();
+    stage = "build-csp";
+    const csp = [
+      "default-src 'none'",
+      `script-src ${[wrapperScript, compositionScript, runtimeSource].map(cspHash).join(" ")}`,
+      `style-src ${cspHash(style)}`,
+      "img-src data: blob:",
+      "media-src data: blob:",
+      "font-src data:",
+      "connect-src 'none'",
+      "object-src 'none'",
+      "frame-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "navigate-to 'none'",
+    ].join("; ");
+    stage = "encode-html";
+    const html = `<!doctype html>
 <html lang="vi" data-oloka-preview-adapter-version="2" data-oloka-csp-profile-version="1">
 <head>
   <meta charset="utf-8">
@@ -70,8 +101,17 @@ ${markup}
 <script>${runtimeSource}</script>
 </body>
 </html>`;
-  const bytes = new TextEncoder().encode(html);
-  return { bytes, checksumSha256: sha256(bytes) };
+    const bytes = new TextEncoder().encode(html);
+    return { bytes, checksumSha256: sha256(bytes) };
+  } catch (error) {
+    if (typeof error === "object" && error !== null) {
+      Object.defineProperty(error, "materializationStage", {
+        value: stage,
+        enumerable: false,
+      });
+    }
+    throw error;
+  }
 }
 
 let runtimePromise: Promise<string> | undefined;
