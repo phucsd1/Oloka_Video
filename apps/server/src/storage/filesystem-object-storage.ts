@@ -1,11 +1,29 @@
 import { constants } from "node:fs";
-import { link, mkdir, open, unlink, lstat, readdir } from "node:fs/promises";
+import {
+  copyFile,
+  link,
+  mkdir,
+  open,
+  unlink,
+  lstat,
+  readdir,
+} from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ObjectStorage, ReadinessResult } from "./object-storage.js";
 import type { StoredObjectStat } from "./object-storage.js";
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+
+interface FilesystemObjectStorageOperations {
+  link(source: string, destination: string): Promise<void>;
+  copyFile(source: string, destination: string, mode: number): Promise<void>;
+}
+
+const DEFAULT_OPERATIONS: FilesystemObjectStorageOperations = {
+  link,
+  copyFile,
+};
 
 export class FilesystemObjectStorage implements ObjectStorage {
   readonly #probePath: string;
@@ -15,11 +33,17 @@ export class FilesystemObjectStorage implements ObjectStorage {
     status: "ready",
   });
 
-  constructor(private readonly rootPath: string) {
+  constructor(
+    private readonly rootPath: string,
+    operations: Partial<FilesystemObjectStorageOperations> = {},
+  ) {
+    this.operations = { ...DEFAULT_OPERATIONS, ...operations };
     this.#probePath = join(rootPath, ".oloka-readiness");
     this.#tmpRoot = join(rootPath, "tmp");
     this.#objectsRoot = join(rootPath, "objects");
   }
+
+  private readonly operations: FilesystemObjectStorageOperations;
 
   async stage(stagingKey: string): Promise<void> {
     const target = await this.resolveContained("staging", stagingKey);
@@ -79,7 +103,16 @@ export class FilesystemObjectStorage implements ObjectStorage {
     await mkdir(dirname(destination), { recursive: true });
     const sourceHandle = await this.openRegularFile(source, constants.O_RDONLY);
     await sourceHandle.close();
-    await link(source, destination);
+    try {
+      await this.operations.link(source, destination);
+    } catch (error) {
+      if (!isHardLinkUnsupported(error)) throw error;
+      await this.operations.copyFile(
+        source,
+        destination,
+        constants.COPYFILE_EXCL,
+      );
+    }
     const destinationHandle = await this.openRegularFile(
       destination,
       constants.O_RDWR,
@@ -348,4 +381,13 @@ export class FilesystemObjectStorage implements ObjectStorage {
     await visit(root);
     return result.sort();
   }
+}
+
+function isHardLinkUnsupported(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    ["EXDEV", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM"].includes(
+      (error as NodeJS.ErrnoException).code ?? "",
+    )
+  );
 }
