@@ -21,6 +21,8 @@ export function registerErrorHandler(app: FastifyInstance): void {
           requestId,
           internalCause: applicationError.internalCause ?? "unexpected_error",
           errorType: error instanceof Error ? error.name : "UnknownError",
+          errorCode: readErrorCode(error),
+          errorSyscall: readErrorSyscall(error),
         },
         "request failed",
       );
@@ -37,6 +39,18 @@ export function registerErrorHandler(app: FastifyInstance): void {
       }),
     );
   });
+}
+
+function readErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function readErrorSyscall(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const syscall = (error as { syscall?: unknown }).syscall;
+  return typeof syscall === "string" ? syscall : undefined;
 }
 
 function normalizeApplicationError(error: unknown): ApplicationError {
