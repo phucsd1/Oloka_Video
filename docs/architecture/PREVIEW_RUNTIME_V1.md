@@ -4,13 +4,17 @@
 
 Each valid immutable `CompositionVersion` maps through one shared trusted materializer to an immutable, checksum-addressed preview artifact. An authorized preview bootstrap loads that artifact into a sandboxed iframe/player. Preview and render consume the same structured document, asset checksums, registry versions, materializer, timing semantics, fonts, and layout presets.
 
+## Technical preview materialization budget
+
+Phase 3F applies a fixed preview-only materialization budget of 16 MiB (`16 * 1024 * 1024`) for the total raw bytes embedded from referenced Assets. The service sums authoritative database sizes before opening any Asset stream and rejects larger previews with `PAYLOAD_TOO_LARGE`. This budget protects the immutable preview path; it is not an upload admission rule. Asset upload admission remains governed by the private-asset policy and its 500 MB maximum.
+
 ```mermaid
 flowchart LR
   V["Immutable CompositionVersion"] --> G["Validate references and schema"]
   G --> M["Trusted shared materializer"]
   M --> A["Immutable preview artifact"]
   A --> U["Authorized preview URL"]
-  U --> I["Sandboxed iframe + HyperFrames player"]
+  U --> I["Oloka host + pinned runtime wrapper"]
   V --> R["Same materializer input for Modal render"]
 ```
 
@@ -22,13 +26,18 @@ The official HyperFrames repository exposes core/runtime/player packages and des
 - `hyperframes preview` is a long-running Studio development server, while `hyperframes play` uses the embeddable `<hyperframes-player>`;
 - CLI lint/check/preview/render are useful verification surfaces, but Studio is an editor/review tool, not a tenant-isolated production service.
 
-Therefore Oloka does not create a forever CLI preview process per project. Preferred MVP integration is a reviewed/pinned official player/core package embedded in Oloka, serving a self-contained immutable artifact. If the reviewed HyperFrames version cannot supply compatible in-process materialization/player behavior, the fallback is a bounded isolated preview worker: one job at a time, random private working directory, loopback-only port, no inherited secrets, resource limits, TTL/lease, health probe, and guaranteed termination/cleanup. The fallback never becomes an unbounded daemon fleet.
+The official `@hyperframes/player@0.7.104` and `@hyperframes/core@0.7.104` packages fail Oloka's secure production compatibility gate: the player grants `allow-scripts allow-same-origin`, embeds a jsDelivr runtime fallback, and core transitively declares `@hyperframes/studio-server`. This is an architecture/security incompatibility, not an npm vulnerability finding. Oloka therefore does not install those packages in production and does not weaken its boundary to fit them.
+
+Phase 3F.0 authorizes an Oloka-owned minimal host/player and materialization adapter using reviewed HyperFrames behavior, with the exact `HyperFrames 0.7.104` runtime artifact vendored at `third_party/hyperframes/v0.7.104/hyperframe.runtime.iife.js`. This is a narrow compatibility implementation, not a general HyperFrames fork. The host creates the iframe itself with `sandbox="allow-scripts"`; it never uses `allow-same-origin`, a CDN fallback, Studio, a CLI server, or a persistent preview daemon.
+
+The compatibility fixture is self-contained and network-denial tested. Full Composition V1/v7 materialization is implemented for review with the vendored runtime, deterministic hash CSP, bundled OFL Noto Sans bytes, structured captions/BGM/transitions, and no iframe HTTP(S) dependency. Production remains schema v6 until cutover.
 
 Official source: <https://github.com/heygen-com/hyperframes>.
 
 ## Artifact and authorization
 
 - Artifact inputs are only validated structured composition, authorized immutable asset bytes, approved registries/fonts, and trusted runtime code.
+- Runtime provenance records upstream `heygen-com/hyperframes` release `v0.7.104`, commit `c96b30c7174984e684620556ce871a285381ec60`, the exact local path, SHA-256, and Apache-2.0 license handling in `third_party/hyperframes/PROVENANCE.json`.
 - The artifact fingerprint includes composition canonical hash, ordered asset byte checksums, registry/template/font versions, materializer/runtime version, and CSP profile version.
 - It is stored under an opaque key and registered in `preview_artifacts`; users see only preview IDs.
 - `GET /api/v1/previews/:id` is owner-only and returns a no-store bootstrap.
@@ -38,9 +47,9 @@ Official source: <https://github.com/heygen-com/hyperframes>.
 
 ## Browser isolation
 
-The preview frame is read-only and receives the minimum sandbox permissions. Initial policy: sandboxed unique origin, scripts only for the trusted bundled runtime, no top navigation, forms, popups, downloads, pointer-lock, presentation, same-origin privilege, or storage APIs. Parent communication uses an allowlisted versioned `postMessage` protocol with exact source/origin/channel verification and data validation.
+The preview frame is read-only and receives the minimum sandbox permissions. Initial policy: `sandbox="allow-scripts"` with a sandboxed unique origin, scripts only for the trusted bundled runtime, no top navigation, forms, popups, downloads, pointer-lock, presentation, same-origin privilege, or storage APIs. Parent communication uses an allowlisted versioned `postMessage` protocol with exact iframe `contentWindow` source identity, random per-bootstrap channel, strict Zod validation, and data validation. Opaque-origin `event.origin === "null"` is never accepted by itself.
 
-CSP is generated by the server and at minimum uses `default-src 'none'`; only checksum/nonce-authorized trusted script/runtime and blob/data media that the materializer deliberately packages are permitted. Network connections, arbitrary images/fonts/media, frames, objects, base URI, and form actions are denied unless resolved into bundled authorized bytes. The production artifact has no arbitrary external network path.
+CSP is generated by the server and at minimum uses `default-src 'none'`; inline scripts/styles are authorized by deterministic SHA-256 hashes, and blob/data media/font bytes are deliberately packaged by the materializer. Network connections, arbitrary images/fonts/media, frames, objects, base URI, and form actions are denied unless resolved into bundled authorized bytes. The production artifact has no arbitrary external network path. The bootstrap channel is generated only by the parent at mount time and is never persisted.
 
 ## Read-only behavior
 

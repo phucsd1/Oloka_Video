@@ -3,5 +3,11 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["eslint.config.js", "playwright.config.ts", "tests/e2e"]
+  "include": [
+    "eslint.config.js",
+    "playwright.config.ts",
+    "playwright.preview.config.ts",
+    "tests/e2e",
+    "tests/e2e-preview"
+  ]
 }

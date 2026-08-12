@@ -1,6 +1,6 @@
 # Phase 3 Implementation Sequence
 
-Status: Slice 3A.1 through the schema-v6 Phase 3E core production cutover are closed. Phase 3E.3 is the current transactional-outbox runtime correction and is not yet deployed; Phase 3F and later provider/render slices require explicit authorization.
+Status: Slice 3A.1 through the schema-v6 Phase 3E production cutover are closed at merge `7c8ae5c8c2f82880aab7364acaf21b26c8db01fc`. Phase 3F.0 has resolved the secure HyperFrames authority blocker with a compatibility prototype; full Phase 3F/v7 and later provider/render slices still require separate authorization.
 
 ## 3A — Persistence kernel
 
@@ -84,7 +84,7 @@ restart private Asset durability were verified before Phase 3E.
 
 ## 3E — Durable Job kernel
 
-Implementation status: schema-v6 core production cutover completed at merge `f6761312ea30f9cc76503447be84e37b758d05f5`. Phase 3E.3 closes the transactional-outbox runtime wiring gap without a migration; that correction remains undeployed pending its own audited cutover.
+Implementation status: Phase 3E production-complete at merge `7c8ae5c8c2f82880aab7364acaf21b26c8db01fc`, including the transactional-outbox runtime wiring correction. No schema change was introduced by that correction.
 
 - Modules/files: Job/JobStep/Event repositories, dispatcher pools, lease/heartbeat/reconciler, quota admission, outbox consumers, cancellation/retry, SSE/history/polling and operations metrics.
 - Schema/migration: v6 generic jobs, steps, events, explicit current-step and
@@ -92,12 +92,14 @@ Implementation status: schema-v6 core production cutover completed at merge `f67
   submission-intent fields, and remaining quota/outbox indexes; no composition
   FK or render-only lineage yet.
 - Test gate: exact state machines, two-claimant/version races, expired leases, process death at every boundary, parent/item identity, idempotency conflict, outbox at-least-once, SSE Last-Event-ID replay, cancellation/retry and real progress.
-- Deployment smoke: the core cutover proved a synthetic non-provider Job survives restart, is reconciled, replays SSE, rejects stale worker results, and exposes queue/lease metrics. Phase 3E.3 requires a later cutover to verify normal outbox backlog draining in production.
+- Deployment smoke: the production cutover proved a synthetic non-provider Job survives restart, is reconciled, replays SSE, rejects stale worker results, exposes queue/lease metrics, and drains the transactional outbox through the application runtime.
 - Rollback: stop new claims, let leases expire, deploy compatible worker or forward fix; admitted Jobs/events are never deleted or inferred from logs/files.
 - Explicitly excluded: actual LLM/TTS/transcription/Modal calls, composition, preview, render outputs.
 - Exit criteria: provider-independent AC-JOB, AC-QUOTA, AC-OBS and restart/recovery gates pass.
 
 ## 3F — Composition and immutable preview
+
+Phase 3F.0 authority decision: official HyperFrames player/core `v0.7.104` failed the secure production package gate because of `allow-same-origin`, jsDelivr fallback, and the transitive Studio-server dependency. Oloka is authorized to use only a narrow, exact-pinned runtime artifact with an Oloka-owned `sandbox="allow-scripts"` host, strict version/channel/source-window messaging, and a self-contained no-network artifact. Security rules remain normative; migration v7 and full Phase 3F implementation are not part of Phase 3F.0.
 
 - Modules/files: Composition V1 schemas/validation/repository, structured edit/current pointer, registry/asset checks, HyperFrames compatibility adapter/materializer, preview artifact/player/sandbox.
 - Schema/migration: v7 creates composition versions, references, Project current

@@ -4,7 +4,7 @@
 
 `CompositionDocumentV1` is the only authoring input accepted by generation, editor, preview, and render. It is structured data, not executable content. Unknown keys are rejected. Raw HTML, CSS, JavaScript, SQL, data URLs, arbitrary external URLs, event handlers, unknown style properties, and arbitrary font names are forbidden.
 
-The Zod schema belongs in `packages/contracts` in Phase 3. This document fixes its semantic contract without implementing it.
+The Zod schema belongs in `packages/contracts`; the Phase 3F implementation is in review. Production remains schema v6 until cutover.
 
 ## Root document
 

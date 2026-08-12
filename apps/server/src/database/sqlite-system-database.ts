@@ -174,6 +174,10 @@ export class SqliteSystemDatabase implements SystemDatabase {
       }
       if (currentVersion === 5) {
         this.applyDurableJobKernelMigration(migrations[5]);
+        currentVersion = 6;
+      }
+      if (currentVersion === 6) {
+        this.applyCompositionsPreviewMigration(migrations[6]);
       }
       this.verifyAppliedMigrations(migrations);
       this.migrationFailure = undefined;
@@ -297,7 +301,7 @@ export class SqliteSystemDatabase implements SystemDatabase {
       this.assertExactFoundationColumns();
       return;
     }
-    if (version >= 2 && version <= 6) {
+    if (version >= 2 && version <= 7) {
       const expectedTables =
         version === 2
           ? [
@@ -352,27 +356,52 @@ export class SqliteSystemDatabase implements SystemDatabase {
                     "upload_sessions",
                     "users",
                   ]
-                : [
-                    "assets",
-                    "audit_events",
-                    "delivery_capabilities",
-                    "idempotency_records",
-                    "job_events",
-                    "job_steps",
-                    "jobs",
-                    "oauth_identities",
-                    "oauth_transactions",
-                    "outbox_events",
-                    "projects",
-                    "provider_credential_references",
-                    "quota_policies",
-                    "quota_reservations",
-                    "schema_migrations",
-                    "sessions",
-                    "system_metadata",
-                    "upload_sessions",
-                    "users",
-                  ];
+                : version === 6
+                  ? [
+                      "assets",
+                      "audit_events",
+                      "delivery_capabilities",
+                      "idempotency_records",
+                      "job_events",
+                      "job_steps",
+                      "jobs",
+                      "oauth_identities",
+                      "oauth_transactions",
+                      "outbox_events",
+                      "projects",
+                      "provider_credential_references",
+                      "quota_policies",
+                      "quota_reservations",
+                      "schema_migrations",
+                      "sessions",
+                      "system_metadata",
+                      "upload_sessions",
+                      "users",
+                    ]
+                  : [
+                      "assets",
+                      "audit_events",
+                      "composition_asset_references",
+                      "composition_versions",
+                      "delivery_capabilities",
+                      "idempotency_records",
+                      "job_events",
+                      "job_steps",
+                      "jobs",
+                      "oauth_identities",
+                      "oauth_transactions",
+                      "outbox_events",
+                      "preview_artifacts",
+                      "projects",
+                      "provider_credential_references",
+                      "quota_policies",
+                      "quota_reservations",
+                      "schema_migrations",
+                      "sessions",
+                      "system_metadata",
+                      "upload_sessions",
+                      "users",
+                    ];
       const applicationTables = tables.filter(
         (table) => !table.startsWith("_litestream_"),
       );
@@ -601,6 +630,46 @@ export class SqliteSystemDatabase implements SystemDatabase {
     });
   }
 
+  private applyCompositionsPreviewMigration(
+    migration: MigrationAsset | undefined,
+  ): void {
+    if (migration?.version !== 7)
+      throw new Error("Compositions and preview migration is missing");
+    const startedAt = this.clock.now();
+    this.database.exec("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON");
+    try {
+      this.database.exec("BEGIN IMMEDIATE");
+      this.database.exec(migration.sql);
+      this.database
+        .prepare(
+          `INSERT INTO schema_migrations
+            (version, name, checksum_sha256, applied_at, execution_ms, app_build_sha)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          migration.version,
+          migration.name,
+          migration.checksum,
+          this.clock.now(),
+          Math.max(0, this.clock.now() - startedAt),
+          this.appBuildSha,
+        );
+      this.database.exec("COMMIT");
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec(
+        "PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON",
+      );
+    }
+    const foreignKeyFailures = this.database
+      .prepare("PRAGMA foreign_key_check")
+      .all();
+    if (foreignKeyFailures.length > 0)
+      throw new Error("Migration v7 foreign key qualification failed");
+  }
+
   private verifyAppliedMigrations(migrations: MigrationAsset[]): void {
     const rows = this.database
       .prepare(
@@ -649,6 +718,7 @@ async function loadMigrationAssets(): Promise<MigrationAsset[]> {
     [4, "canonical-project", "0004-canonical-project.sql"],
     [5, "private-assets", "0005-private-assets.sql"],
     [6, "durable-job-kernel", "0006-durable-job-kernel.sql"],
+    [7, "compositions-preview", "0007-compositions-preview.sql"],
   ] as const;
   return Promise.all(
     definitions.map(async ([version, name, filename]) => {

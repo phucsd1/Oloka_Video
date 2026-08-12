@@ -1,0 +1,64 @@
+{
+  "runtimePath": "third_party/hyperframes/v0.7.104/hyperframe.runtime.iife.js",
+  "bytes": 342023,
+  "sha256": "a61e40e57329eeb9941c35ff9dac3ed8f0abfcee3246d2c5bfa2332e2df0c0c0",
+  "counts": {
+    "eval": 0,
+    "newFunction": 0,
+    "fetch": 4,
+    "xhr": 0,
+    "webSocket": 0,
+    "eventSource": 0,
+    "worker": 0,
+    "dynamicScriptCreation": 1,
+    "dynamicImport": 0,
+    "iframeCreation": 0,
+    "documentNavigation": 0,
+    "storage": 0,
+    "cookie": 0,
+    "top": 0,
+    "opener": 0
+  },
+  "classifications": {
+    "fetch": "unreachable in the approved simple self-contained fixture path; browser network-denial test is mandatory",
+    "dynamicScriptCreation": "unreachable in the approved simple fixture path; used only for external composition loading",
+    "eval": "absent",
+    "newFunction": "absent",
+    "xhr": "absent",
+    "webSocket": "absent",
+    "eventSource": "absent",
+    "worker": "absent",
+    "storage": "absent",
+    "cookie": "absent",
+    "opener": "absent",
+    "top": "absent",
+    "iframeCreation": "absent",
+    "documentNavigation": "absent"
+  },
+  "reviewedOccurrences": {
+    "fetch": [
+      {
+        "sourcePath": "packages/core/src/runtime/captionOverrides.ts",
+        "classification": "unreachable without a caption override reference"
+      },
+      {
+        "sourcePath": "packages/core/src/runtime/compositionLoader.ts",
+        "classification": "unreachable without data-composition-src"
+      },
+      {
+        "sourcePath": "packages/core/src/runtime/colorGrading.ts",
+        "classification": "unreachable without an external LUT reference"
+      },
+      {
+        "sourcePath": "packages/core/src/runtime/webAudioTransport.ts",
+        "classification": "unreachable without media elements"
+      }
+    ],
+    "dynamicScriptCreation": [
+      {
+        "sourcePath": "packages/core/src/runtime/compositionLoader.ts",
+        "classification": "unreachable without external composition loading"
+      }
+    ]
+  }
+}

@@ -18,6 +18,11 @@ The minimum document contains:
 | Assets       | Frozen manifest resolving owned `ready + active` Asset IDs to immutable object/checksum references |
 | Runtime      | Renderer, HyperFrames, render protocol, font and caption manifest versions                         |
 
+Runtime provenance is separate from the canonical document: Phase 3F.0 pins
+the reviewed HyperFrames `0.7.104` runtime bytes and adapter fingerprint in
+`third_party/hyperframes/PROVENANCE.json`. The official player/core package
+graph is not part of the production dependency path.
+
 ## Structured edit operations
 
 MVP permits changing scene text, duration, order, scene Asset references, voice, caption on/off/preset, aspect ratio, BGM Asset/volume, and schema-allowlisted style fields. Each accepted edit validates the whole document and creates a new CompositionVersion. It does not mutate the previous version.

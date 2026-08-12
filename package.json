@@ -20,6 +20,8 @@
     "test:integration": "npm run test:integration -w @oloka/server",
     "test:frontend": "npm run test -w @oloka/web",
     "test:e2e": "playwright test",
+    "test:preview": "playwright test -c playwright.preview.config.ts",
+    "audit:hyperframes-runtime": "node scripts/audit-hyperframes-runtime.mjs",
     "start": "node apps/server/dist/index.js"
   },
   "engines": {

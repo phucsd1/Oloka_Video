@@ -398,6 +398,64 @@ h1 {
   flex-wrap: wrap;
 }
 
+.composition-workspace {
+  margin: -0.25rem 0 1.25rem;
+  padding: 1rem;
+  border-left: 3px solid #1f563e;
+  background:
+    linear-gradient(120deg, rgba(31, 86, 62, 0.08), transparent 48%),
+    var(--color-surface, #fffdf8);
+}
+.composition-editor-grid {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  margin: 1rem 0;
+}
+.composition-editor-grid label,
+.composition-workspace > label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.composition-editor-grid input,
+.composition-editor-grid select,
+.composition-workspace > label textarea {
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  min-height: 2.4rem;
+  padding: 0.55rem 0.65rem;
+}
+.composition-workspace > label textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+.checkbox-label {
+  align-content: end;
+  display: flex !important;
+  gap: 0.45rem;
+}
+.preview-host {
+  aspect-ratio: 16 / 9;
+  background: #101820;
+  border-radius: 12px;
+  margin-top: 1rem;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.preview-limit-note {
+  margin: 0 0 8px;
+  color: var(--muted-text, #667085);
+  font-size: 0.8rem;
+}
+.preview-host iframe {
+  border: 0;
+  height: 100%;
+  width: 100%;
+}
+
 @media (max-width: 640px) {
   .asset-toolbar,
   .asset-search-row {

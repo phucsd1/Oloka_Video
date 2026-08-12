@@ -42,6 +42,7 @@ describe("Private Asset migration v5", () => {
         { version: 4 },
         { version: 5 },
         { version: 6 },
+        { version: 7 },
       ]);
       expect(database.listApplicationTables()).toEqual(
         expect.arrayContaining([
@@ -58,7 +59,7 @@ describe("Private Asset migration v5", () => {
     }
   });
 
-  it("creates one verified exact-v4-to-v6 backup and no duplicate on restart", async () => {
+  it("creates one verified exact-v4-to-v7 backup and no duplicate on restart", async () => {
     const directory = await mkdtemp(join(tmpdir(), "oloka-asset-v5-backup-"));
     temporaryDirectories.push(directory);
     const databasePath = join(directory, "database.sqlite");
@@ -110,8 +111,8 @@ describe("Private Asset migration v5", () => {
         ),
       ).resolves.toMatchObject({
         sourceSchemaVersion: 4,
-        targetSchemaVersion: 6,
-        migrationVersionsPending: [5, 6],
+        targetSchemaVersion: 7,
+        migrationVersionsPending: [5, 6, 7],
       });
       await database.migrate();
       expect(await readdir(join(backupRoot, "pre-migration"))).toEqual([
